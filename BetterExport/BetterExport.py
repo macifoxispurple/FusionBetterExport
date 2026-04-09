@@ -1,4 +1,5 @@
 import json
+import importlib
 import importlib.util
 import os
 import shutil
@@ -16,6 +17,12 @@ import adsk.fusion
 ADDIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if ADDIN_DIR not in sys.path:
     sys.path.insert(0, ADDIN_DIR)
+
+import export_sorter as _export_sorter
+import update_state as _update_state
+
+_export_sorter = importlib.reload(_export_sorter)
+_update_state = importlib.reload(_update_state)
 
 from export_sorter import (
     VERSION_TOKEN_RE,
@@ -135,6 +142,7 @@ GENERAL_DEFAULTS = {
     'auto_check_updates': True,
     'run_on_startup': True,
     'allow_overwrite': True,
+    'strip_version_numbers': True,
     'open_folder_after_export': True,
     'mesh_group_expanded': True,
     'cad_group_expanded': False,
@@ -966,6 +974,7 @@ def _read_general_settings(inputs):
     auto_check_updates = _read_bool_input(inputs, 'auto_check_updates')
     run_on_startup = _read_bool_input(inputs, 'run_on_startup')
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
+    strip_version_numbers = _read_bool_input(inputs, 'strip_version_numbers')
     open_folder_after_export = _read_bool_input(inputs, 'open_folder_after_export')
     customize_per_format = _read_bool_input(inputs, 'customize_per_format')
     f3d_enabled_preference = _read_bool_input(inputs, 'f3d_enabled_preference')
@@ -980,6 +989,7 @@ def _read_general_settings(inputs):
         auto_check_updates,
         run_on_startup,
         allow_overwrite,
+        strip_version_numbers,
         open_folder_after_export,
         customize_per_format,
         f3d_enabled_preference
@@ -996,6 +1006,7 @@ def _read_general_settings(inputs):
         'auto_check_updates': auto_check_updates,
         'run_on_startup': run_on_startup,
         'allow_overwrite': allow_overwrite,
+        'strip_version_numbers': strip_version_numbers,
         'open_folder_after_export': open_folder_after_export,
         'mesh_group_expanded': mesh_group_expanded,
         'cad_group_expanded': cad_group_expanded,
@@ -1778,6 +1789,7 @@ def _sync_ui(command_inputs):
     sorted_output_summary = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('sorted_output_folder_summary'))
     browse_sorted_output_button = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('browse_sorted_output_folder'))
     overwrite_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('allow_overwrite'))
+    strip_versions_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('strip_version_numbers'))
     open_folder_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('open_folder_after_export'))
     customize_per_format_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('customize_per_format'))
     mesh_group_input = adsk.core.GroupCommandInput.cast(command_inputs.itemById('mesh_format_group'))
@@ -1808,6 +1820,7 @@ def _sync_ui(command_inputs):
         not sorted_output_summary or
         not browse_sorted_output_button or
         not overwrite_input or
+        not strip_versions_input or
         not open_folder_input or
         not customize_per_format_input or
         not mesh_group_input or
@@ -1878,6 +1891,7 @@ def _sync_ui(command_inputs):
     sorted_output_summary.isVisible = settings['auto_sort_after_export'] and not print_destination_mode
     browse_sorted_output_button.isVisible = settings['auto_sort_after_export'] and not print_destination_mode
     overwrite_input.isVisible = settings['auto_sort_after_export']
+    strip_versions_input.isVisible = settings['auto_sort_after_export']
     open_folder_input.isVisible = not print_destination_mode
     print_format_selector.isVisible = print_destination_mode
     print_selector.isVisible = print_destination_mode
@@ -2509,6 +2523,14 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 '',
                 bool(settings['allow_overwrite'])
             )
+            strip_versions_input = inputs.addBoolValueInput(
+                'strip_version_numbers',
+                'Strip Version Numbers From Sorted Filenames',
+                True,
+                '',
+                bool(settings.get('strip_version_numbers', True))
+            )
+            strip_versions_input.tooltip = 'Keep project folders based on the clean project name, but remove Fusion version markers from sorted filenames.'
             open_folder_input = inputs.addBoolValueInput(
                 'open_folder_after_export',
                 'Open Destination After Export',
@@ -2877,7 +2899,11 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                     adsk.doEvents()
                 conflict_resolver = None
                 if not settings['allow_overwrite']:
-                    scanned_conflicts = scan_export_conflicts(temp_staging_dir, settings['sorted_output_folder'])
+                    scanned_conflicts = scan_export_conflicts(
+                        temp_staging_dir,
+                        settings['sorted_output_folder'],
+                        strip_version_numbers=settings.get('strip_version_numbers', True)
+                    )
                     if scanned_conflicts:
                         conflict_action = _choose_sort_conflict_action(scanned_conflicts)
                         if conflict_action == 'skip':
@@ -2895,7 +2921,8 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                     temp_staging_dir,
                     settings['sorted_output_folder'],
                     allow_overwrite=settings['allow_overwrite'],
-                    conflict_resolver=conflict_resolver
+                    conflict_resolver=conflict_resolver,
+                    strip_version_numbers=settings.get('strip_version_numbers', True)
                 )
                 if sort_result.get('conflicts_skipped'):
                     export_cancelled = True

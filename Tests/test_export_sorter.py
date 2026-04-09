@@ -121,6 +121,56 @@ class ExportSorterTests(unittest.TestCase):
         self.assertEqual(sorted_step.read_text(encoding="utf-8"), "step-data")
         self.assertEqual(result["moved_mesh_files"], 1)
 
+    def test_strip_version_numbers_can_be_disabled_for_sorted_mesh_outputs(self):
+        (self.input_dir / "DeskClip v2.stl").write_text("stl-data", encoding="utf-8")
+
+        result = process_exports(
+            str(self.input_dir),
+            str(self.output_dir),
+            strip_version_numbers=False
+        )
+
+        sorted_stl = self.output_dir / "DeskClip" / "STL" / "DeskClip v2.stl"
+        self.assertTrue(sorted_stl.exists())
+        self.assertEqual(sorted_stl.read_text(encoding="utf-8"), "stl-data")
+        self.assertFalse((self.output_dir / "DeskClip v2").exists())
+        self.assertEqual(result["moved_mesh_files"], 1)
+        self.assertEqual(result["renamed_mesh_files"], 0)
+
+    def test_strip_version_numbers_disabled_still_keeps_highest_version(self):
+        (self.input_dir / "DeskClip v1.stl").write_text("old-stl", encoding="utf-8")
+        (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
+
+        result = process_exports(
+            str(self.input_dir),
+            str(self.output_dir),
+            strip_version_numbers=False
+        )
+
+        self.assertEqual(result["deleted_mesh_duplicates"], 1)
+        self.assertFalse((self.output_dir / "DeskClip" / "STL" / "DeskClip v1.stl").exists())
+        self.assertEqual(
+            (self.output_dir / "DeskClip" / "STL" / "DeskClip v2.stl").read_text(encoding="utf-8"),
+            "new-stl"
+        )
+
+    def test_scan_export_conflicts_preserves_versioned_target_when_stripping_disabled(self):
+        (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
+
+        existing = self.output_dir / "DeskClip" / "STL" / "DeskClip v2.stl"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text("old-stl", encoding="utf-8")
+
+        conflicts = scan_export_conflicts(
+            str(self.input_dir),
+            str(self.output_dir),
+            strip_version_numbers=False
+        )
+
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["incoming_name"], "DeskClip v2.stl")
+        self.assertEqual(conflicts[0]["target_path"], str(existing))
+
 
 if __name__ == "__main__":
     unittest.main()

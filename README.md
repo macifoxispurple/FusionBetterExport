@@ -63,6 +63,8 @@ The sorting pass can:
 
 There is also a `Replace Existing Sorted Files` option for cases where you want sorted outputs to replace existing files.
 
+If you prefer to keep Fusion's version markers in the files themselves, you can turn off `Strip Version Numbers From Sorted Filenames`. Better Export will still use the cleaned base name for the project folder, so `DeskClip v2.stl` still lands under `DeskClip`, but the sorted file can keep its versioned filename.
+
 If you want a faster handoff into the rest of your workflow, Better Export can also open the destination folder automatically after a successful export.
 
 One nice side effect of auto-sort is that it plays well with the `Reload from disk` feature in many 3D printer slicers. Because the add-in keeps writing cleaned files back to stable project folders, you can often refresh an existing model in the slicer in place instead of dragging a new copy in every time you export an updated version from Fusion.

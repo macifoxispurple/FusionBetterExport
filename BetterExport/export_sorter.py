@@ -29,6 +29,10 @@ def normalize_final_name(name):
     return VERSION_TOKEN_RE.sub(lambda match: match.group(1), name).replace(" ", "")
 
 
+def sorted_final_name(name, strip_version_numbers=True):
+    return normalize_final_name(name) if strip_version_numbers else name
+
+
 def project_name(filename):
     stem = Path(filename).stem
     part = stem.split("_", 1)[0]
@@ -206,7 +210,7 @@ def _rewrite_obj_mtllib_reference(path, simulate_only):
     return True
 
 
-def scan_export_conflicts(input_dir, output_dir):
+def scan_export_conflicts(input_dir, output_dir, strip_version_numbers=True):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
 
@@ -233,13 +237,13 @@ def scan_export_conflicts(input_dir, output_dir):
             continue
         planned_sortable.append({
             "original_name": path.name,
-            "final_name": normalize_final_name(path.name),
+            "final_name": sorted_final_name(path.name, strip_version_numbers),
             "suffix": path.suffix
         })
 
     for entry in planned_sortable:
         final_name = entry["final_name"]
-        proj = project_name(normalize_final_name(final_name))
+        proj = project_name(normalize_final_name(entry["original_name"]))
         destination = output_dir / proj / export_dest_folder(entry["suffix"]) / final_name
         if destination.exists():
             conflicts.append({
@@ -252,7 +256,7 @@ def scan_export_conflicts(input_dir, output_dir):
 
     best_f3d = {}
     for path in f3d_files:
-        cleaned_name = normalize_final_name(path.name)
+        cleaned_name = normalize_keep_key(path.name)
         version = extract_version(path.name)
         current = best_f3d.get(cleaned_name)
         if current is None or version > current[0]:
@@ -274,11 +278,12 @@ def scan_export_conflicts(input_dir, output_dir):
             })
 
         if path.name in best_clean_names:
-            clean_target = proj_dir / normalize_final_name(path.name)
+            clean_name = sorted_final_name(path.name, strip_version_numbers)
+            clean_target = proj_dir / clean_name
             if clean_target.exists():
                 conflicts.append({
                     "operation": "copy",
-                    "incoming_name": normalize_final_name(path.name),
+                    "incoming_name": clean_name,
                     "existing_name": clean_target.name,
                     "target_path": str(clean_target),
                     "keep_both_name": path.name
@@ -287,7 +292,7 @@ def scan_export_conflicts(input_dir, output_dir):
     return conflicts
 
 
-def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=True, conflict_resolver=None):
+def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=True, conflict_resolver=None, strip_version_numbers=True):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
 
@@ -329,10 +334,11 @@ def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=
     renamed_sortable_files = []
     for path in sorted(sortable_files, key=lambda entry: entry.name.lower()):
         original_name = path.name
-        new_name = normalize_final_name(path.name)
+        new_name = sorted_final_name(path.name, strip_version_numbers)
         target = path.with_name(new_name)
         renamed_path, rename_action = _rename_file(path, target, simulate_only, allow_overwrite, conflict_resolver)
-        _rewrite_obj_mtllib_reference(renamed_path, simulate_only)
+        if strip_version_numbers:
+            _rewrite_obj_mtllib_reference(renamed_path, simulate_only)
         if renamed_path.name != path.name:
             result["renamed_mesh_files"] += 1
         if rename_action == "overwrite":
@@ -368,7 +374,7 @@ def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=
 
     best_f3d = {}
     for path in f3d_files:
-        cleaned_name = normalize_final_name(path.name)
+        cleaned_name = normalize_keep_key(path.name)
         version = extract_version(path.name)
         current = best_f3d.get(cleaned_name)
         if current is None or version > current[0]:
@@ -400,7 +406,7 @@ def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=
             continue
 
         if path.name in best_clean_names:
-            clean_target = proj_dir / normalize_final_name(path.name)
+            clean_target = proj_dir / sorted_final_name(path.name, strip_version_numbers)
             keep_both_clean_target = proj_dir / archived_path.name
             copied, copy_action, _ = _copy_file(
                 archived_path,
