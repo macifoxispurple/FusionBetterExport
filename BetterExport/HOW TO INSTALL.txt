@@ -14,7 +14,7 @@ Option 1: Install from inside Fusion
 Option 2: Copy into Fusion's default add-in folder
 
 macOS default add-in folder:
-~/Library/Application Support/Autodesk/Autodesk Fusion/AddIns/
+~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/
 
 Windows default add-in folder:
 %AppData%\Autodesk\Autodesk Fusion\API\AddIns\
