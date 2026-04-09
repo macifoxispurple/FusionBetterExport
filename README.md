@@ -17,16 +17,13 @@ This add-in is meant to make that process feel much less repetitive.
 
 ## What it can do
 
-- Export `STL`, `OBJ`, `3MF`, and `F3D` from one command
-- Export multiple file types in a single run
-- Remember your export preferences between Fusion launches
-- Use either one shared settings block or separate settings per format
-- Default the `File Name` field to the active Fusion document name each time the dialog opens
-- Remember the normal export folder and auto-sort preference per Fusion project, while keeping one global sorted-output folder for all automatically sorted exports
-- Add a toolbar button in Fusion's `Utilities` area when available
-- Add a right-click Browser context menu entry for exportable selections
-- Show export progress while the batch is running
-- Optionally auto-sort exported files into project folders after export
+- Export `STL`, `OBJ`, `3MF`, and `F3D` from one command instead of bouncing between separate Fusion export flows
+- Export multiple output types in a single pass when you need more than one format from the same design
+- Remember the settings and folders you actually use, so repeat exports take much less setup
+- Let you choose between a simple direct-export workflow and an automatic sort-and-organize workflow
+- Keep per-project behavior where it matters, like normal export folders and whether a given file should auto-sort
+- Support either one shared settings block or separate settings per format, depending on how much control you want
+- Fit into Fusion more naturally with a toolbar button, Browser context-menu entry, and visible export progress while the batch runs
 
 ## Export sorting
 
