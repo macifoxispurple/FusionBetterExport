@@ -34,9 +34,10 @@
 
 1. In Fusion, open `Utilities > Scripts and Add-Ins`.
 2. Go to the `Add-Ins` tab.
-3. Click the green `+` button and select the folder:
+3. Download and unzip `dist/BetterExport-1.0.0.zip` from the GitHub repository, or clone the repo locally.
+4. Click the green `+` button and select the folder:
    `/Users/alex/Documents/Codex/BetterExport/BetterExport`
-4. Run the add-in.
+5. Run the add-in.
 
 The command appears as `Better Export` in a `Better Export` panel on the `Utilities` ribbon tab when Fusion exposes that tab. If Fusion does not expose a Utilities tab in the current workspace, the add-in falls back to the Scripts and Add-Ins area. It is also added to Fusion's right-click context menu for exportable Browser selections like components, occurrences, and bodies.
 
