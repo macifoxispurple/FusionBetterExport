@@ -1005,7 +1005,7 @@ def _choose_sort_conflict_action(conflicts):
         '\n\nChoose an action for all conflicts:\n'
         'Yes: Overwrite existing files\n'
         'No: Keep both files and save the new one with a unique name if needed\n'
-        'Cancel: Discard newly exported conflicting files and continue'
+        'Cancel: Keep the existing files and discard all new conflicting files'
     ).format(len(conflicts), "\n\n".join(preview_lines), extra_text)
 
     if not _ui:
