@@ -1560,6 +1560,7 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
             status_input.formattedText = 'Version v{} - Updated successfully'.format(current_version)
             status_input.tooltip = ''
             update_now_input.isVisible = False
+            clear_update_state(UPDATE_STATE_PATH)
             return
 
     if not auto_check_enabled and not manual:
