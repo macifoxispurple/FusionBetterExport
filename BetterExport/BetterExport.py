@@ -2004,9 +2004,21 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 option_values['filename'] = _default_filename()
                 _add_option_inputs(inputs, format_key, option_values, '{} Settings'.format(label))
 
+            update_table = inputs.addTableCommandInput('update_table', '', 2, '4:1')
+            update_table.columnSpacing = 1
+            update_table.rowSpacing = 0
+            update_table.hasGrid = False
+            update_table.tablePresentationStyle = adsk.core.TablePresentationStyles.itemBorderTablePresentationStyle
+
             update_status = inputs.addTextBoxCommandInput('update_status', '', '', 1, True)
-            update_status.isFullWidth = True
             update_status.isVisible = True
+            update_table.addCommandInput(update_status, 0, 0, 0, 0)
+
+            update_now_input = inputs.addBoolValueInput('update_now', 'Update Now', False, '', False)
+            update_now_input.isFullWidth = True
+            update_now_input.isVisible = False
+            update_table.addCommandInput(update_now_input, 0, 1, 0, 0)
+
             inputs.addBoolValueInput(
                 'auto_check_updates',
                 'Check For Updates Automatically',
@@ -2015,8 +2027,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 bool(settings['auto_check_updates'])
             )
             inputs.addBoolValueInput('check_updates_now', 'Check For Updates', False, '', False)
-            update_now_input = inputs.addBoolValueInput('update_now', 'Update Now', False, '', False)
-            update_now_input.isVisible = False
             run_on_startup_input = inputs.addBoolValueInput(
                 'run_on_startup',
                 'Run On Startup',
