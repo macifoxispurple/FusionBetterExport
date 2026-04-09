@@ -53,10 +53,7 @@ The sorting pass can:
 - create one cleaned top-level F3D copy for the highest-version file
 - organize outputs into per-project folders and type-specific subfolders
 
-There are also options for:
-
-- `Simulate Sort Only`
-- `Allow Overwrite`
+There is also an `Allow Overwrite` option for cases where you want sorted outputs to replace existing files.
 
 On a successful sorted export, the temporary staging folder is removed automatically. If something fails, the temp folder is kept so you can inspect what was exported.
 

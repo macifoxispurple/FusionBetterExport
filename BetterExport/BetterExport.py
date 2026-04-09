@@ -78,7 +78,6 @@ GENERAL_DEFAULTS = {
     'folder': os.path.expanduser('~'),
     'sorted_output_folder': os.path.expanduser('~'),
     'auto_sort_after_export': False,
-    'simulate_sort_only': False,
     'allow_overwrite': True,
     'project_export_folders': {}
 }
@@ -205,6 +204,7 @@ def _save_settings(values):
     existing_settings = _load_settings_for_save()
     settings = _merge_settings(existing_settings)
     settings.update(values or {})
+    settings.pop('simulate_sort_only', None)
     settings['formats'] = _normalized_formats(settings.get('formats'), settings.get('format'))
     settings['settings_mode'] = settings['settings_mode'] if settings.get('settings_mode') in SETTINGS_MODE_LABELS else 'global'
     settings['per_format_settings'] = _normalized_per_format_settings(settings.get('per_format_settings'))
@@ -382,14 +382,12 @@ def _read_general_settings(inputs):
     folder = _read_string_input(inputs, 'folder')
     sorted_output_folder = _read_string_input(inputs, 'sorted_output_folder')
     auto_sort_after_export = _read_bool_input(inputs, 'auto_sort_after_export')
-    simulate_sort_only = _read_bool_input(inputs, 'simulate_sort_only')
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
 
     if None in (
         folder,
         sorted_output_folder,
         auto_sort_after_export,
-        simulate_sort_only,
         allow_overwrite
     ):
         return None
@@ -398,7 +396,6 @@ def _read_general_settings(inputs):
         'folder': folder,
         'sorted_output_folder': sorted_output_folder,
         'auto_sort_after_export': auto_sort_after_export,
-        'simulate_sort_only': simulate_sort_only,
         'allow_overwrite': allow_overwrite
     }
 
@@ -715,7 +712,6 @@ def _sync_ui(command_inputs):
     sorted_output_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('sorted_output_folder'))
     sorted_output_summary = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('sorted_output_folder_summary'))
     browse_sorted_output_button = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('browse_sorted_output_folder'))
-    simulate_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('simulate_sort_only'))
     overwrite_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('allow_overwrite'))
 
     if (
@@ -725,7 +721,6 @@ def _sync_ui(command_inputs):
         not sorted_output_input or
         not sorted_output_summary or
         not browse_sorted_output_button or
-        not simulate_input or
         not overwrite_input
     ):
         return
@@ -736,7 +731,6 @@ def _sync_ui(command_inputs):
     sorted_output_input.isVisible = False
     sorted_output_summary.isVisible = settings['auto_sort_after_export']
     browse_sorted_output_button.isVisible = settings['auto_sort_after_export']
-    simulate_input.isVisible = settings['auto_sort_after_export']
     overwrite_input.isVisible = settings['auto_sort_after_export']
 
     folder_summary.formattedText = _short_path(settings['folder'])
@@ -998,13 +992,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             browse_sorted_output_button = inputs.addBoolValueInput('browse_sorted_output_folder', 'Browse Sorted Output…', False, '', False)
             browse_sorted_output_button.tooltip = 'Choose the sorted projects folder.'
             inputs.addBoolValueInput(
-                'simulate_sort_only',
-                'Simulate Sort Only',
-                True,
-                '',
-                bool(settings['simulate_sort_only'])
-            )
-            inputs.addBoolValueInput(
                 'allow_overwrite',
                 'Allow Overwrite',
                 True,
@@ -1181,7 +1168,6 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 process_exports(
                     temp_staging_dir,
                     settings['sorted_output_folder'],
-                    simulate_only=settings['simulate_sort_only'],
                     allow_overwrite=settings['allow_overwrite']
                 )
 
