@@ -18,6 +18,19 @@ if ADDIN_DIR not in sys.path:
     sys.path.insert(0, ADDIN_DIR)
 
 from export_sorter import VERSION_TOKEN_RE, process_exports, scan_export_conflicts
+from update_state import (
+    STATE_APPLIED,
+    STATE_FAILED,
+    STATE_STAGED,
+    applied_update_state,
+    clear_update_state,
+    fail_update_state,
+    normalize_update_state,
+    read_update_state,
+    stage_update_state,
+    startup_preference_after_apply,
+    write_update_state,
+)
 
 
 COMMAND_ID = 'betterMeshExportCommand'
@@ -41,6 +54,7 @@ UPDATE_CACHE_MAX_AGE_SECONDS = 5 * 60
 PENDING_UPDATE_DIR = os.path.join(ADDIN_DIR, '_pending_update')
 PENDING_UPDATE_INFO_PATH = os.path.join(PENDING_UPDATE_DIR, 'update.json')
 UPDATE_HELPER_PATH = os.path.join(ADDIN_DIR, 'update_helper.py')
+UPDATE_STATE_PATH = os.path.join(ADDIN_DIR, 'update_state.json')
 
 FORMAT_LABELS = {
     'stl': 'STL',
@@ -501,17 +515,6 @@ def _latest_release_info(force_refresh=False, allow_cached_on_error=True):
         }
 
 
-def _pending_update_version():
-    if not os.path.exists(PENDING_UPDATE_INFO_PATH):
-        return ''
-    try:
-        with open(PENDING_UPDATE_INFO_PATH, 'r', encoding='utf-8') as handle:
-            payload = json.load(handle)
-        return str(payload.get('latest_version') or '').strip()
-    except Exception:
-        return ''
-
-
 def _download_release_asset(asset_url, destination_path):
     request = urllib.request.Request(
         asset_url,
@@ -593,7 +596,16 @@ def _set_manifest_version(version_text):
         json.dump(manifest, handle, indent=2)
 
 
+def _current_update_state():
+    return read_update_state(UPDATE_STATE_PATH)
+
+
+def _write_current_update_state(state):
+    return write_update_state(UPDATE_STATE_PATH, state)
+
+
 def _stage_update_payload(release_info):
+    current_version = _current_addin_version()
     latest_version = release_info.get('latest_version', '')
     asset_url = release_info.get('latest_asset_url', '')
     asset_name = release_info.get('latest_asset_name') or 'BetterExport-{}.zip'.format(latest_version or 'update')
@@ -617,28 +629,35 @@ def _stage_update_payload(release_info):
         raise ValueError('The downloaded release package did not contain a BetterExport add-in folder.')
 
     _write_update_helper()
+    script_item = _script_item_for_addin()
+    previous_run_on_startup = bool(_safe_call(lambda: script_item.isRunOnStartup)) if script_item else False
     _set_run_on_startup(True)
     _set_manifest_version(latest_version)
 
-    update_info = {
-        'latest_version': latest_version,
-        'staged_addin_dir': extracted_addin_dir,
-        'staged_at': time.time()
-    }
+    update_info = stage_update_state(
+        latest_version,
+        current_version,
+        extracted_addin_dir,
+        previous_run_on_startup
+    )
     with open(PENDING_UPDATE_INFO_PATH, 'w', encoding='utf-8') as handle:
         json.dump(update_info, handle, indent=2, sort_keys=True)
+    _write_current_update_state(update_info)
     return update_info
 
 
 def _apply_pending_update_if_needed():
+    update_state = _current_update_state()
+    if update_state.get('state') != STATE_STAGED:
+        return None
     if not os.path.exists(PENDING_UPDATE_INFO_PATH) or not os.path.exists(UPDATE_HELPER_PATH):
         return None
 
     try:
         with open(PENDING_UPDATE_INFO_PATH, 'r', encoding='utf-8') as handle:
-            update_info = json.load(handle)
+            update_info = normalize_update_state(json.load(handle))
         staged_addin_dir = str(update_info.get('staged_addin_dir') or '').strip()
-        latest_version = str(update_info.get('latest_version') or '').strip()
+        latest_version = str(update_info.get('target_version') or '').strip()
         if not staged_addin_dir or not os.path.isdir(staged_addin_dir):
             raise ValueError('The staged update files are missing.')
 
@@ -654,9 +673,29 @@ def _apply_pending_update_if_needed():
             shutil.rmtree(pycache_dir, ignore_errors=True)
 
         shutil.rmtree(PENDING_UPDATE_DIR, ignore_errors=True)
-        return {'latest_version': latest_version or _current_addin_version(), 'error': ''}
+        try:
+            _set_run_on_startup(startup_preference_after_apply(update_info))
+        except Exception:
+            pass
+        applied_state = applied_update_state(update_info, latest_version or _current_addin_version())
+        _write_current_update_state(applied_state)
+        return {'status': 'applied', 'latest_version': latest_version or _current_addin_version(), 'error': ''}
     except Exception as exc:
-        return {'latest_version': '', 'error': str(exc)}
+        failure_state = fail_update_state(update_state, str(exc))
+        _write_current_update_state(failure_state)
+        try:
+            _set_run_on_startup(startup_preference_after_apply(update_state))
+        except Exception:
+            pass
+        try:
+            _set_manifest_version(update_state.get('installed_version') or _current_addin_version())
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(PENDING_UPDATE_DIR, ignore_errors=True)
+        except Exception:
+            pass
+        return {'status': 'failed', 'latest_version': '', 'error': str(exc)}
 
 
 def _launch_updated_addin_from_disk(context):
@@ -1426,16 +1465,38 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
     if not status_input or not auto_check_input or not update_now_input:
         return
 
+    update_state = _current_update_state()
     current_version = _current_addin_version()
-    pending_version = _pending_update_version()
+    display_version = str(update_state.get('installed_version') or current_version).strip() if update_state.get('state') in (STATE_STAGED, STATE_FAILED) else current_version
     auto_check_enabled = bool(auto_check_input.value)
 
-    if pending_version:
+    if update_state.get('state') == STATE_STAGED:
         status_input.isVisible = True
-        status_input.formattedText = 'Version v{} - Restart pending for v{}'.format(current_version, pending_version)
+        status_input.formattedText = 'Version v{} - Restart pending for v{}'.format(display_version, update_state.get('target_version'))
         status_input.tooltip = ''
         update_now_input.isVisible = False
         return
+
+    if update_state.get('state') == STATE_FAILED:
+        status_input.isVisible = True
+        status_input.formattedText = 'Version v{} - Staged update to v{} failed'.format(
+            display_version,
+            update_state.get('target_version') or '?'
+        )
+        status_input.tooltip = str(update_state.get('failure_message') or '')
+        update_now_input.isVisible = True
+        return
+
+    if update_state.get('state') == STATE_APPLIED:
+        if force_refresh or manual:
+            clear_update_state(UPDATE_STATE_PATH)
+            update_state = _current_update_state()
+        else:
+            status_input.isVisible = True
+            status_input.formattedText = 'Version v{} - Updated successfully'.format(current_version)
+            status_input.tooltip = ''
+            update_now_input.isVisible = False
+            return
 
     if not auto_check_enabled and not manual:
         status_input.isVisible = True
@@ -2203,14 +2264,14 @@ def run(context):
 
         update_result = _apply_pending_update_if_needed()
         if update_result:
-            if update_result.get('error'):
+            if update_result.get('status') == 'failed':
                 _ui.messageBox(
                     'Better Export could not apply the staged update:\n{}'.format(update_result['error']),
                     COMMAND_NAME
                 )
-            else:
+            elif update_result.get('status') == 'applied':
                 _launch_updated_addin_from_disk(context)
-            return
+                return
 
         command_definition = _ui.commandDefinitions.itemById(COMMAND_ID)
         if not command_definition:
