@@ -1,0 +1,33 @@
+Better Export for Autodesk Fusion
+
+How to install
+
+Option 1: Install from inside Fusion
+1. Download and unzip this package.
+2. Open Autodesk Fusion.
+3. Go to Utilities > Scripts and Add-Ins.
+4. Open the Add-Ins tab.
+5. Click the green + button.
+6. Select the unzipped BetterExport folder.
+7. Run the add-in.
+
+Option 2: Copy into Fusion's default add-in folder
+
+macOS default add-in folder:
+~/Library/Application Support/Autodesk/Autodesk Fusion/AddIns/
+
+Windows default add-in folder:
+%AppData%\Autodesk\Autodesk Fusion\API\AddIns\
+
+Installation by copy:
+1. Download and unzip this package.
+2. Copy the BetterExport folder into your platform's AddIns folder above.
+3. Open Autodesk Fusion.
+4. Go to Utilities > Scripts and Add-Ins.
+5. Open the Add-Ins tab.
+6. Find Better Export and run it.
+
+Notes
+- Keep the BetterExport folder name unchanged.
+- The folder you copy should contain BetterExport.py and BetterExport.manifest directly inside it.
+- If you update to a newer version later, replace the existing BetterExport folder with the new one.
