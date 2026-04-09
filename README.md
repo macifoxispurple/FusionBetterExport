@@ -29,7 +29,7 @@ This add-in is meant to make that process feel much less repetitive.
 
 ## Export sorting
 
-If you turn on `Sort Automatically After Export`, Better Export will:
+If you choose `Sort Into Project Folders`, Better Export will:
 
 1. Export files into a temporary staging folder
 2. Process the exported files immediately after the batch finishes
@@ -52,7 +52,7 @@ The sorting pass can:
 - create one cleaned top-level F3D copy for the highest-version file
 - organize outputs into per-project folders and type-specific subfolders
 
-There is also an `Allow Overwrite` option for cases where you want sorted outputs to replace existing files.
+There is also a `Replace Existing Sorted Files` option for cases where you want sorted outputs to replace existing files.
 
 If you want a faster handoff into the rest of your workflow, Better Export can also open the destination folder automatically after a successful export.
 

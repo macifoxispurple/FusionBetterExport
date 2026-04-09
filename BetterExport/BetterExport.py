@@ -1430,6 +1430,7 @@ def _sync_ui(command_inputs):
     target_input = adsk.core.SelectionCommandInput.cast(command_inputs.itemById('geometry'))
     target_hint = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('target_hint'))
     destination_mode_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('destination_mode'))
+    destination_hint = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('destination_hint'))
     format_note = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('format_note'))
     f3d_pref_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('f3d_enabled_preference'))
     f3d_checkbox = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('format_f3d'))
@@ -1449,6 +1450,7 @@ def _sync_ui(command_inputs):
         not target_input or
         not target_hint or
         not destination_mode_input or
+        not destination_hint or
         not format_note or
         not f3d_pref_input or
         not f3d_checkbox or
@@ -1473,6 +1475,11 @@ def _sync_ui(command_inputs):
         target_hint.formattedText = 'Exports only bodies that are currently visible in the design.'
     else:
         target_hint.formattedText = 'Select a body, component, or occurrence to export.'
+
+    if settings['auto_sort_after_export']:
+        destination_hint.formattedText = 'Sort Into Project Folders organizes files into project folders automatically.'
+    else:
+        destination_hint.formattedText = 'Direct Export writes files into one folder without reorganizing them afterward.'
 
     visible_bodies_mode = target_mode == 'visible_bodies'
     previous_target_mode = (last_target_mode_input.value or '').strip() or target_mode
@@ -1585,7 +1592,7 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
     if manual or not auto_check_enabled:
         status_input.isVisible = True
         if release_info.get('error'):
-            status_input.formattedText = 'Version v{} - Unable to check for updates right now'.format(current_version)
+            status_input.formattedText = 'Version v{} - Can’t check for updates right now'.format(current_version)
             status_input.tooltip = str(release_info.get('error', ''))
         else:
             status_input.formattedText = 'Version v{} - Up to date'.format(current_version)
@@ -1617,10 +1624,10 @@ def _choose_sort_conflict_action(conflicts):
     extra_count = max(0, len(conflicts) - len(preview_lines))
     extra_text = "\n\nAnd {} more conflict(s).".format(extra_count) if extra_count else ""
     message = (
-        '{} sorted export conflict(s) were found.\n\n'
+        '{} sorted export file conflict(s) were found.\n\n'
         '{}{}'
         '\n\nChoose an action for all conflicts:\n'
-        'Yes: Overwrite existing files\n'
+        'Yes: Replace the existing sorted files\n'
         'No: Keep both files and save the new one with a unique name if needed\n'
         'Cancel: Keep the existing files and discard all new conflicting files'
     ).format(len(conflicts), "\n\n".join(preview_lines), extra_text)
@@ -1630,7 +1637,7 @@ def _choose_sort_conflict_action(conflicts):
 
     result = _ui.messageBox(
         message,
-        'Overwrite conflicting files?',
+        'Replace existing sorted files?',
         adsk.core.MessageBoxButtonTypes.YesNoCancelButtonType,
         adsk.core.MessageBoxIconTypes.WarningIconType
     )
@@ -1644,12 +1651,12 @@ def _choose_sort_conflict_action(conflicts):
 def _choose_single_sort_conflict_action(source, target, operation, keep_both_target):
     keep_both_name = keep_both_target.name if keep_both_target else source.name
     message = (
-        'A sorted export file already exists at this location. Overwrite it?\n\n'
+        'A sorted export file already exists at this location. Replace it?\n\n'
         'Incoming file:\n{}\n\n'
         'Existing file:\n{}\n\n'
         'Location:\n{}\n\n'
         'Choose an action:\n'
-        'Yes: Overwrite the existing file\n'
+        'Yes: Replace the existing file\n'
         'No: Keep both files and save the new one as {}\n'
         'Cancel: Keep the existing file and discard the new conflicting file'
     ).format(
@@ -1664,7 +1671,7 @@ def _choose_single_sort_conflict_action(source, target, operation, keep_both_tar
 
     result = _ui.messageBox(
         message,
-        'Overwrite conflicting file?',
+        'Replace existing sorted file?',
         adsk.core.MessageBoxButtonTypes.YesNoCancelButtonType,
         adsk.core.MessageBoxIconTypes.WarningIconType
     )
@@ -1947,10 +1954,18 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 bool(settings['auto_sort_after_export']),
                 ''
             )
+            destination_hint_input = inputs.addTextBoxCommandInput(
+                'destination_hint',
+                '',
+                '',
+                2,
+                True
+            )
+            destination_hint_input.isFullWidth = True
 
             auto_sort_input = inputs.addBoolValueInput(
                 'auto_sort_after_export',
-                'Sort Automatically After Export',
+                'Organize Into Project Folders Automatically',
                 True,
                 '',
                 bool(settings['auto_sort_after_export'])
@@ -1995,19 +2010,19 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             browse_sorted_output_button.tooltip = 'Choose the sorted projects folder.'
             inputs.addBoolValueInput(
                 'allow_overwrite',
-                'Allow Overwrite',
+                'Replace Existing Sorted Files',
                 True,
                 '',
                 bool(settings['allow_overwrite'])
             )
             open_folder_input = inputs.addBoolValueInput(
                 'open_folder_after_export',
-                'Open Folder After Export',
+                'Open Destination After Export',
                 True,
                 '',
                 bool(settings.get('open_folder_after_export', True))
             )
-            open_folder_input.tooltip = 'Open the export destination folder after a successful export.'
+            open_folder_input.tooltip = 'Open the export destination after a successful export.'
 
             format_group = inputs.addGroupCommandInput('format_group', 'Formats')
             format_inputs = format_group.children
