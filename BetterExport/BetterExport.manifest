@@ -2,7 +2,7 @@
   "autodeskProduct": "Fusion",
   "type": "addin",
   "id": "9f2c4064-7b95-4df1-b918-fb98de5624b2",
-  "author": "OpenAI Codex",
+  "author": "Maci Fox",
   "description": {
     "": "Adds a persistent export command for mesh and CAD formats."
   },
