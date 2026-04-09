@@ -59,6 +59,43 @@ There is also an `Allow Overwrite` option for cases where you want sorted output
 
 On a successful sorted export, the temporary staging folder is removed automatically. If something fails, the temp folder is kept so you can inspect what was exported.
 
+One nice side effect of auto-sort is that it plays well with the `Reload from disk` feature in many 3D printer slicers. Because the add-in keeps writing cleaned files back to stable project folders, you can often refresh an existing model in the slicer in place instead of dragging a new copy in every time you export an updated version from Fusion.
+
+## Example sorted output
+
+If `Sorted Projects Folder` is set to `~/Documents/Fusion Exports`, the add-in might create a structure like this after an auto-sorted export:
+
+```text
+~/Documents/Fusion Exports/
+├── DeskCableClip/
+│   ├── DeskCableClip.f3d
+│   ├── 3MFs/
+│   │   └── DeskCableClip_MainBody.3mf
+│   ├── F3Ds/
+│   │   ├── DeskCableClip v4.f3d
+│   │   └── DeskCableClip v5.f3d
+│   ├── OBJs/
+│   │   ├── DeskCableClip_MainBody.mtl
+│   │   └── DeskCableClip_MainBody.obj
+│   └── STLs/
+│       └── DeskCableClip_MainBody.stl
+└── LampArmBracket/
+    ├── LampArmBracket.f3d
+    ├── F3Ds/
+    │   ├── LampArmBracket v2.f3d
+    │   └── LampArmBracket v3.f3d
+    └── STLs/
+        └── LampArmBracket_45deg.stl
+```
+
+A few things to notice:
+
+- project folders are created from the cleaned filename prefix before the first underscore
+- mesh files are sorted into `STLs`, `3MFs`, or `OBJs`
+- `.mtl` files are kept beside their matching `.obj`
+- original `.f3d` files are archived in `F3Ds`
+- the highest-version `.f3d` also gets one cleaned top-level copy in the project folder
+
 ## Install
 
 The easiest way to install it is:
