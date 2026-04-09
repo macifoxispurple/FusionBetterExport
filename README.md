@@ -24,6 +24,7 @@ This add-in is meant to make that process feel much less repetitive.
 - Keep per-project behavior where it matters, like normal export folders and whether a given file should auto-sort
 - Choose whether to export the full design, only currently visible bodies, or a specific selection
 - Support either one shared settings block or separate settings per format, depending on how much control you want
+- Send a single mesh export straight to Fusion's print-utility handoff when you want to jump directly into a slicer
 - Optionally open the export destination folder automatically after a successful export
 - Keep mesh formats front and center while tucking CAD / Solids formats into a separate section
 - Fit into Fusion more naturally with a toolbar button, Browser context-menu entry, and visible export progress while the batch runs

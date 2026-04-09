@@ -106,7 +106,8 @@ TARGET_MODE_LABELS = {
 
 DESTINATION_MODE_LABELS = {
     'direct': 'Direct Export',
-    'sorted': 'Sort Into Project Folders'
+    'sorted': 'Sort Into Project Folders',
+    'print_utility': 'Send To Print Utility'
 }
 
 OPTION_DEFAULTS = {
@@ -137,6 +138,7 @@ GENERAL_DEFAULTS = {
     'open_folder_after_export': True,
     'mesh_group_expanded': True,
     'cad_group_expanded': False,
+    'non_print_formats': ['stl'],
     'project_export_folders': {},
     'project_auto_sort_preferences': {},
     'update_check': {}
@@ -157,6 +159,9 @@ _app = None
 _ui = None
 _handlers = []
 _updated_runtime_module = None
+_ui_sync_in_progress = False
+_format_sync_in_progress = False
+_ignored_format_uncheck_events = set()
 
 
 def _open_folder_in_system(path_value):
@@ -241,6 +246,10 @@ def _merge_settings(values):
         merged['target_mode'] = 'full_design' if legacy_full_root else 'selection'
     merged['always_export_full_root'] = merged['target_mode'] == 'full_design'
     merged['formats'] = _normalized_formats(merged.get('formats'), merged.get('format'))
+    if isinstance(values, dict) and 'non_print_formats' in values:
+        merged['non_print_formats'] = _normalized_formats(merged.get('non_print_formats'))
+    else:
+        merged['non_print_formats'] = list(merged['formats'])
     if isinstance(values, dict) and 'f3d_enabled_preference' in values:
         merged['f3d_enabled_preference'] = bool(values.get('f3d_enabled_preference'))
     else:
@@ -297,6 +306,7 @@ def _save_settings(values):
     settings.update(values or {})
     settings.pop('simulate_sort_only', None)
     settings['formats'] = _normalized_formats(settings.get('formats'), settings.get('format'))
+    settings['non_print_formats'] = _normalized_formats(settings.get('non_print_formats'))
     settings['settings_mode'] = settings['settings_mode'] if settings.get('settings_mode') in SETTINGS_MODE_LABELS else 'global'
     settings['per_format_settings'] = _normalized_per_format_settings(settings.get('per_format_settings'))
     settings['project_export_folders'] = _normalized_project_export_folders(settings.get('project_export_folders'))
@@ -897,6 +907,38 @@ def _destination_mode_from_inputs(inputs):
     return 'sorted' if auto_sort_enabled else 'direct'
 
 
+def _print_utility_settings_from_inputs(inputs):
+    hidden_mode = adsk.core.StringValueCommandInput.cast(inputs.itemById('print_destination_utility_mode'))
+    hidden_value = adsk.core.StringValueCommandInput.cast(inputs.itemById('print_destination_utility_value'))
+    mode = (hidden_mode.value or '').strip() if hidden_mode else ''
+    value = hidden_value.value.strip() if hidden_value else None
+    if not mode:
+        mode = _selected_key(inputs, 'destination_print_utility_mode')
+    if value is None:
+        value = _read_string_input(inputs, 'destination_print_utility_value')
+    return mode or 'default', value or ''
+
+
+def _print_destination_format_from_inputs(inputs, fallback='stl'):
+    dropdown_label = _dropdown_value(inputs, 'destination_print_format')
+    for format_key in MESH_FORMAT_KEYS:
+        if dropdown_label == FORMAT_LABELS[format_key]:
+            return format_key
+
+    input_obj = adsk.core.StringValueCommandInput.cast(inputs.itemById('print_destination_format'))
+    value = (input_obj.value or '').strip() if input_obj else ''
+    return value if value in MESH_FORMAT_KEYS else fallback
+
+
+def _format_preferences_from_input(inputs, input_id, fallback=None):
+    input_obj = adsk.core.StringValueCommandInput.cast(inputs.itemById(input_id))
+    value = input_obj.value if input_obj else ''
+    formats = [key for key in value.split(',') if key in FORMAT_LABELS]
+    if formats:
+        return formats
+    return list(fallback or DEFAULT_SETTINGS['formats'])
+
+
 def _read_option_values(inputs, scope_key):
     result = {}
     for field_name, default_value in OPTION_DEFAULTS.items():
@@ -1257,6 +1299,37 @@ def _distance_unit_enum(unit_key):
     return fallback.get(unit_key)
 
 
+def _design_default_unit_key():
+    design = _active_design()
+    units_manager = getattr(design, 'unitsManager', None) if design else None
+    unit_value = _safe_call(lambda: units_manager.defaultLengthUnits) if units_manager else ''
+    normalized = str(unit_value or '').strip().lower()
+    mapping = {
+        'mm': 'mm',
+        'millimeter': 'mm',
+        'millimeters': 'mm',
+        'millimetre': 'mm',
+        'millimetres': 'mm',
+        'cm': 'cm',
+        'centimeter': 'cm',
+        'centimeters': 'cm',
+        'centimetre': 'cm',
+        'centimetres': 'cm',
+        'm': 'm',
+        'meter': 'm',
+        'meters': 'm',
+        'metre': 'm',
+        'metres': 'm',
+        'in': 'in',
+        'inch': 'in',
+        'inches': 'in',
+        'ft': 'ft',
+        'foot': 'ft',
+        'feet': 'ft'
+    }
+    return mapping.get(normalized)
+
+
 def _create_export_options(format_key, geometry, filename='', root_export=False):
     design = _active_design()
     export_manager = design.exportManager
@@ -1454,8 +1527,29 @@ def _combined_capabilities(format_keys, geometry):
 
 def _dropdown_value(inputs, input_id):
     dropdown = adsk.core.DropDownCommandInput.cast(inputs.itemById(input_id))
-    selected_item = dropdown.selectedItem if dropdown else None
-    return selected_item.name if selected_item else ''
+    return _dropdown_selected_label(dropdown)
+
+
+def _dropdown_selected_label(dropdown):
+    if not dropdown:
+        return ''
+    try:
+        selected_item = dropdown.selectedItem
+        if selected_item:
+            return selected_item.name
+    except Exception:
+        pass
+
+    try:
+        list_items = dropdown.listItems
+        for index in range(list_items.count):
+            item = list_items.item(index)
+            if item and item.isSelected:
+                return item.name
+    except Exception:
+        pass
+
+    return ''
 
 
 def _selected_key(inputs, input_id):
@@ -1466,11 +1560,77 @@ def _selected_key(inputs, input_id):
     if input_id.endswith('unit_type'):
         return UNIT_KEYS_BY_LABEL.get(raw_value, 'default')
     if input_id.endswith('print_utility_mode'):
-        if raw_value == 'Fusion Default':
-            return 'default'
-        if raw_value == 'Custom Path Or Name':
-            return 'custom'
+        return _print_utility_key_from_label(raw_value)
     return raw_value
+
+
+def _print_utility_key_from_label(label):
+    if label == 'Fusion Default':
+        return 'default'
+    if label == 'Custom Path Or Name':
+        return 'custom'
+    return label or 'default'
+
+
+def _print_utility_label_from_key(key):
+    if key == 'custom':
+        return 'Custom Path Or Name'
+    if key in ('', 'default'):
+        return 'Fusion Default'
+    return key
+
+
+def _print_utility_labels(option_values, capabilities):
+    selected_label = _print_utility_label_from_key(option_values.get('print_utility_mode', 'default'))
+    labels = ['Fusion Default']
+    for utility_name in capabilities.get('available_print_utilities', []):
+        if utility_name not in labels:
+            labels.append(utility_name)
+    if selected_label not in labels and selected_label != 'Custom Path Or Name':
+        labels.append(selected_label)
+    labels.append('Custom Path Or Name')
+    return labels
+
+
+def _sync_print_utility_dropdown(print_selector, print_value, option_values, capabilities):
+    global _ui_sync_in_progress
+    if not print_selector or not print_value:
+        return
+    current_mode = option_values.get('print_utility_mode', 'default')
+    current_value = option_values.get('print_utility_value', '')
+    selected_label = _print_utility_label_from_key(current_mode)
+
+    try:
+        _ui_sync_in_progress = True
+        list_items = print_selector.listItems
+        list_items.clear()
+        list_items.add('Fusion Default', False, '')
+        for utility_name in capabilities.get('available_print_utilities', []):
+            list_items.add(utility_name, False, '')
+        if selected_label not in ('Fusion Default', 'Custom Path Or Name') and selected_label not in capabilities.get('available_print_utilities', []):
+            list_items.add(selected_label, False, '')
+        list_items.add('Custom Path Or Name', False, '')
+
+        selected_item = None
+        for index in range(list_items.count):
+            item = list_items.item(index)
+            if item and item.name == selected_label:
+                selected_item = item
+                break
+        if selected_item:
+            selected_item.isSelected = True
+        elif list_items.count:
+            list_items.item(0).isSelected = True
+
+        print_value.value = current_value
+        print_value.isVisible = selected_label == 'Custom Path Or Name'
+        print_value.tooltip = (
+            'Enter a print utility executable path or a known utility name.'
+            if print_value.isVisible else
+            'Using Fusion or utility default.'
+        )
+    finally:
+        _ui_sync_in_progress = False
 
 
 def _parse_positive_float(text, label):
@@ -1497,16 +1657,36 @@ def _current_settings_from_inputs(inputs):
             return dict(_load_settings())
         per_format_settings[format_key] = option_values
 
+    selected_formats = _selected_formats_from_inputs(inputs)
+    destination_mode = _destination_mode_from_inputs(inputs)
+    print_utility_mode, print_utility_value = _print_utility_settings_from_inputs(inputs)
+    normal_destination_formats = list(selected_formats)
+    if destination_mode == 'print_utility':
+        fallback_mesh = next((format_key for format_key in normal_destination_formats if format_key in MESH_FORMAT_KEYS), MESH_FORMAT_KEYS[0])
+        selected_formats = [_print_destination_format_from_inputs(inputs, fallback_mesh)]
+        global_values['send_to_print_utility'] = True
+        global_values['print_utility_mode'] = print_utility_mode
+        global_values['print_utility_value'] = print_utility_value
+        for format_key, option_values in per_format_settings.items():
+            option_values['send_to_print_utility'] = format_key == selected_formats[0]
+            option_values['print_utility_mode'] = print_utility_mode
+            option_values['print_utility_value'] = print_utility_value
+    else:
+        global_values['send_to_print_utility'] = False
+        for option_values in per_format_settings.values():
+            option_values['send_to_print_utility'] = False
+
     return {
         **general_settings,
         **global_values,
-        'formats': _selected_formats_from_inputs(inputs),
+        'formats': selected_formats,
+        'non_print_formats': normal_destination_formats,
         'settings_mode': general_settings['settings_mode'],
         'per_format_settings': per_format_settings
     }
 
 
-def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities, group_visible, auto_sort_enabled):
+def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities, group_visible, auto_sort_enabled, print_destination_mode=False):
     group_input = adsk.core.GroupCommandInput.cast(command_inputs.itemById(_group_input_id(scope_key)))
     refinement_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'mesh_refinement')))
     binary_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'binary_format')))
@@ -1536,19 +1716,16 @@ def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities
 
     refinement_input.isVisible = capabilities['mesh_refinement']
     binary_input.isVisible = capabilities['binary_format']
-    one_per_body_input.isVisible = capabilities['one_file_per_body']
+    one_per_body_input.isVisible = capabilities['one_file_per_body'] and not print_destination_mode
     unit_input.isVisible = capabilities['unit_type']
-    send_to_print_input.isVisible = capabilities['send_to_print'] and not auto_sort_enabled
-
-    if not capabilities['send_to_print'] or auto_sort_enabled:
-        send_to_print_input.value = False
+    send_to_print_input.isVisible = False
 
     refinement_visible = capabilities['surface_deviation'] or capabilities['normal_deviation'] or capabilities['maximum_edge_length'] or capabilities['aspect_ratio']
     custom_group.isVisible = refinement_visible and option_values['mesh_refinement'] == 'custom'
 
     utilities = capabilities['available_print_utilities']
-    print_selector.isVisible = capabilities['send_to_print'] and not auto_sort_enabled and send_to_print_input.value and capabilities['print_utility']
-    print_value.isVisible = capabilities['send_to_print'] and not auto_sort_enabled and send_to_print_input.value and capabilities['print_utility']
+    print_selector.isVisible = False
+    print_value.isVisible = False
 
     if print_selector.isVisible:
         list_items = print_selector.listItems
@@ -1571,6 +1748,7 @@ def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities
 
 
 def _sync_ui(command_inputs):
+    global _format_sync_in_progress, _ignored_format_uncheck_events
     settings = _merge_settings(_current_settings_from_inputs(command_inputs))
     geometry = _target_geometry(settings, command_inputs) or _root_component()
     if not geometry:
@@ -1581,6 +1759,15 @@ def _sync_ui(command_inputs):
     target_hint = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('target_hint'))
     destination_mode_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('destination_mode'))
     destination_hint = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('destination_hint'))
+    print_format_selector = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('destination_print_format'))
+    print_selector = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('destination_print_utility_mode'))
+    print_value = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('destination_print_utility_value'))
+    browse_print_utility_button = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('browse_print_utility'))
+    print_format_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('print_destination_format'))
+    print_format_preferences_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('print_destination_format_preferences'))
+    print_utility_mode_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('print_destination_utility_mode'))
+    print_utility_value_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('print_destination_utility_value'))
+    last_destination_mode_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('last_destination_mode'))
     format_note = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('format_note'))
     cad_preferences_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('cad_format_preferences'))
     last_target_mode_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('last_target_mode'))
@@ -1593,6 +1780,8 @@ def _sync_ui(command_inputs):
     overwrite_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('allow_overwrite'))
     open_folder_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('open_folder_after_export'))
     customize_per_format_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('customize_per_format'))
+    mesh_group_input = adsk.core.GroupCommandInput.cast(command_inputs.itemById('mesh_format_group'))
+    cad_group_input = adsk.core.GroupCommandInput.cast(command_inputs.itemById('cad_format_group'))
 
     if (
         not target_mode_input or
@@ -1600,6 +1789,15 @@ def _sync_ui(command_inputs):
         not target_hint or
         not destination_mode_input or
         not destination_hint or
+        not print_format_selector or
+        not print_selector or
+        not print_value or
+        not browse_print_utility_button or
+        not print_format_input or
+        not print_format_preferences_input or
+        not print_utility_mode_input or
+        not print_utility_value_input or
+        not last_destination_mode_input or
         not format_note or
         not cad_preferences_input or
         not last_target_mode_input or
@@ -1611,7 +1809,9 @@ def _sync_ui(command_inputs):
         not browse_sorted_output_button or
         not overwrite_input or
         not open_folder_input or
-        not customize_per_format_input
+        not customize_per_format_input or
+        not mesh_group_input or
+        not cad_group_input
     ):
         return
 
@@ -1624,12 +1824,27 @@ def _sync_ui(command_inputs):
     else:
         target_hint.formattedText = 'Select a body, component, or occurrence to export.'
 
-    if settings['auto_sort_after_export']:
+    destination_mode = _destination_mode_from_inputs(command_inputs)
+    print_destination_mode = destination_mode == 'print_utility'
+
+    if print_destination_mode:
+        destination_hint.formattedText = 'Send To Print Utility opens one mesh export directly in your selected slicer or print utility.'
+    elif settings['auto_sort_after_export']:
         destination_hint.formattedText = 'Sort Into Project Folders organizes files into project folders automatically.'
     else:
         destination_hint.formattedText = 'Direct Export writes files into one folder without reorganizing them afterward.'
 
     visible_bodies_mode = target_mode == 'visible_bodies'
+    previous_destination_mode = (last_destination_mode_input.value or '').strip() or destination_mode
+    if print_destination_mode and previous_destination_mode != 'print_utility':
+        selected_formats = _selected_formats_from_inputs(command_inputs)
+        print_format_preferences_input.value = ','.join(selected_formats or settings.get('non_print_formats', DEFAULT_SETTINGS['formats']))
+
+    if print_destination_mode:
+        active_mesh = _print_destination_format_from_inputs(command_inputs, MESH_FORMAT_KEYS[0])
+        print_format_input.value = active_mesh
+    last_destination_mode_input.value = destination_mode
+
     previous_target_mode = (last_target_mode_input.value or '').strip() or target_mode
     if visible_bodies_mode and previous_target_mode != 'visible_bodies':
         selected_cad = []
@@ -1644,7 +1859,7 @@ def _sync_ui(command_inputs):
             if checkbox:
                 checkbox.value = False
                 checkbox.isEnabled = False
-    else:
+    elif not print_destination_mode:
         restore_set = {key for key in (cad_preferences_input.value or '').split(',') if key in CAD_FORMAT_KEYS}
         for format_key in CAD_FORMAT_KEYS:
             checkbox = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(f'format_{format_key}'))
@@ -1652,17 +1867,23 @@ def _sync_ui(command_inputs):
                 checkbox.isEnabled = True
                 if previous_target_mode == 'visible_bodies':
                     checkbox.value = format_key in restore_set
-    format_note.isVisible = visible_bodies_mode
+    format_note.isVisible = visible_bodies_mode and not print_destination_mode
     format_note.formattedText = 'CAD / Solids formats are unavailable in Export Only Visible Bodies mode because those exports work at the component level.'
     last_target_mode_input.value = target_mode
 
     folder_input.isVisible = False
-    folder_summary.isVisible = not settings['auto_sort_after_export']
-    browse_folder_button.isVisible = not settings['auto_sort_after_export']
+    folder_summary.isVisible = not settings['auto_sort_after_export'] and not print_destination_mode
+    browse_folder_button.isVisible = not settings['auto_sort_after_export'] and not print_destination_mode
     sorted_output_input.isVisible = False
-    sorted_output_summary.isVisible = settings['auto_sort_after_export']
-    browse_sorted_output_button.isVisible = settings['auto_sort_after_export']
+    sorted_output_summary.isVisible = settings['auto_sort_after_export'] and not print_destination_mode
+    browse_sorted_output_button.isVisible = settings['auto_sort_after_export'] and not print_destination_mode
     overwrite_input.isVisible = settings['auto_sort_after_export']
+    open_folder_input.isVisible = not print_destination_mode
+    print_format_selector.isVisible = print_destination_mode
+    print_selector.isVisible = print_destination_mode
+    mesh_group_input.isVisible = not print_destination_mode
+    cad_group_input.isVisible = not print_destination_mode
+    customize_per_format_input.isVisible = not print_destination_mode
     customize_per_format_input.tooltip = 'Reveal separate STL, OBJ, 3MF, and F3D settings sections.'
 
     folder_summary.formattedText = _short_path(settings['folder'])
@@ -1670,18 +1891,35 @@ def _sync_ui(command_inputs):
     sorted_output_summary.formattedText = _short_path(settings['sorted_output_folder'])
     sorted_output_summary.tooltip = settings['sorted_output_folder']
     open_folder_input.value = bool(settings.get('open_folder_after_export', True))
+    selected_mesh_for_print = next((key for key in settings['formats'] if key in MESH_FORMAT_KEYS), MESH_FORMAT_KEYS[0])
+    print_capabilities = _capabilities_for(selected_mesh_for_print, geometry)
+    print_values = _settings_for_format(settings, selected_mesh_for_print)
+    if print_destination_mode:
+        print_value.value = print_values.get('print_utility_value', '')
+        print_value.isVisible = print_values.get('print_utility_mode') == 'custom'
+        browse_print_utility_button.isVisible = print_values.get('print_utility_mode') == 'custom'
+        print_value.tooltip = (
+            'Enter a print utility executable path or a known utility name.'
+            if print_value.isVisible else
+            'Using Fusion or utility default.'
+        )
+        print_utility_mode_input.value = print_values.get('print_utility_mode', 'default')
+        print_utility_value_input.value = print_values.get('print_utility_value', '')
+    else:
+        print_value.isVisible = False
+        browse_print_utility_button.isVisible = False
 
-    settings_mode = settings['settings_mode']
+    settings_mode = 'global' if print_destination_mode else settings['settings_mode']
     global_capabilities = _combined_capabilities(settings['formats'], geometry)
     global_values = _settings_for_format(settings, _primary_format(settings))
-    _sync_option_scope_ui(command_inputs, 'global', global_values, global_capabilities, settings_mode == 'global', settings['auto_sort_after_export'])
+    _sync_option_scope_ui(command_inputs, 'global', global_values, global_capabilities, settings_mode == 'global', settings['auto_sort_after_export'], print_destination_mode)
 
     for format_key in FORMAT_LABELS:
         format_geometry = _geometry_for_format(format_key, geometry)
         capabilities = _capabilities_for(format_key, format_geometry) if format_geometry else _empty_capabilities()
         option_values = settings['per_format_settings'][format_key]
         group_visible = settings_mode == 'per_format' and format_key in settings['formats']
-        _sync_option_scope_ui(command_inputs, format_key, option_values, capabilities, group_visible, settings['auto_sort_after_export'])
+        _sync_option_scope_ui(command_inputs, format_key, option_values, capabilities, group_visible, settings['auto_sort_after_export'], print_destination_mode)
 
 
 def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
@@ -1867,15 +2105,19 @@ def _apply_options_from_settings(format_key, options, settings):
         if _supports_attr(options, 'aspectRatio'):
             options.aspectRatio = _parse_positive_float(settings['aspect_ratio'], 'Aspect ratio')
 
-    if is_mesh and _supports_attr(options, 'unitType') and settings['unit_type'] != 'default':
-        unit_enum = _distance_unit_enum(settings['unit_type'])
+    unit_key = settings['unit_type']
+    if is_mesh and settings['send_to_print_utility'] and unit_key == 'default':
+        unit_key = _design_default_unit_key() or unit_key
+
+    if is_mesh and _supports_attr(options, 'unitType') and unit_key != 'default':
+        unit_enum = _distance_unit_enum(unit_key)
         if unit_enum is not None:
             options.unitType = unit_enum
 
     if format_key == 'stl' and _supports_attr(options, 'isBinaryFormat'):
         options.isBinaryFormat = bool(settings['binary_format'])
 
-    if is_mesh and _supports_attr(options, 'isOneFilePerBody'):
+    if is_mesh and _supports_attr(options, 'isOneFilePerBody') and not settings['send_to_print_utility']:
         options.isOneFilePerBody = bool(settings['one_file_per_body'])
 
     if is_mesh and _supports_attr(options, 'sendToPrintUtility'):
@@ -1896,6 +2138,7 @@ def _validate_inputs(command_inputs):
         return False, 'Open a Fusion design before using this command.'
 
     settings = _current_settings_from_inputs(command_inputs)
+    destination_mode = _destination_mode_from_inputs(command_inputs)
     target_mode = settings.get('target_mode', 'selection')
     geometry = _target_geometry(settings, command_inputs)
     if not geometry:
@@ -1911,6 +2154,13 @@ def _validate_inputs(command_inputs):
 
     if not settings['formats']:
         return False, 'Select at least one export format.'
+
+    if destination_mode == 'print_utility':
+        if len(settings['formats']) != 1 or settings['formats'][0] not in MESH_FORMAT_KEYS:
+            return False, 'Send To Print Utility supports one mesh format at a time.'
+        format_settings = _settings_for_format(settings, settings['formats'][0])
+        if format_settings['print_utility_mode'] == 'custom' and not format_settings['print_utility_value']:
+            return False, 'Enter a print utility path or switch away from the custom print utility mode.'
 
     for format_key in settings['formats']:
         format_geometry = _geometry_for_format(format_key, geometry)
@@ -2119,12 +2369,17 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             )
             destination_mode_input.listItems.add(
                 DESTINATION_MODE_LABELS['direct'],
-                not settings['auto_sort_after_export'],
+                not settings['auto_sort_after_export'] and not settings.get('send_to_print_utility'),
                 ''
             )
             destination_mode_input.listItems.add(
                 DESTINATION_MODE_LABELS['sorted'],
-                bool(settings['auto_sort_after_export']),
+                bool(settings['auto_sort_after_export']) and not settings.get('send_to_print_utility'),
+                ''
+            )
+            destination_mode_input.listItems.add(
+                DESTINATION_MODE_LABELS['print_utility'],
+                bool(settings.get('send_to_print_utility')),
                 ''
             )
             destination_hint_input = inputs.addTextBoxCommandInput(
@@ -2135,6 +2390,72 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 True
             )
             destination_hint_input.isFullWidth = True
+            print_format_preferences_input = inputs.addStringValueInput(
+                'print_destination_format_preferences',
+                'Print Destination Format Preferences',
+                ','.join(settings.get('non_print_formats', settings['formats']))
+            )
+            print_format_preferences_input.isVisible = False
+            print_destination_format_input = inputs.addStringValueInput(
+                'print_destination_format',
+                'Print Destination Format',
+                next((key for key in settings['formats'] if key in MESH_FORMAT_KEYS), MESH_FORMAT_KEYS[0])
+            )
+            print_destination_format_input.isVisible = False
+            print_destination_utility_mode_input = inputs.addStringValueInput(
+                'print_destination_utility_mode',
+                'Print Destination Utility Mode',
+                settings.get('print_utility_mode', 'default')
+            )
+            print_destination_utility_mode_input.isVisible = False
+            print_destination_utility_value_input = inputs.addStringValueInput(
+                'print_destination_utility_value',
+                'Print Destination Utility Value',
+                settings.get('print_utility_value', '')
+            )
+            print_destination_utility_value_input.isVisible = False
+            last_destination_mode_input = inputs.addStringValueInput(
+                'last_destination_mode',
+                'Last Destination Mode',
+                'print_utility' if settings.get('send_to_print_utility') else ('sorted' if settings['auto_sort_after_export'] else 'direct')
+            )
+            last_destination_mode_input.isVisible = False
+
+            selected_print_format = next((key for key in settings['formats'] if key in MESH_FORMAT_KEYS), MESH_FORMAT_KEYS[0])
+            destination_print_format_selector = inputs.addDropDownCommandInput(
+                'destination_print_format',
+                'Print Format',
+                adsk.core.DropDownStyles.TextListDropDownStyle
+            )
+            for format_key in MESH_FORMAT_KEYS:
+                destination_print_format_selector.listItems.add(
+                    FORMAT_LABELS[format_key],
+                    format_key == selected_print_format,
+                    ''
+                )
+
+            destination_print_selector = inputs.addDropDownCommandInput(
+                'destination_print_utility_mode',
+                'Print Utility',
+                adsk.core.DropDownStyles.TextListDropDownStyle
+            )
+            print_capabilities = _capabilities_for(selected_print_format, _root_component())
+            selected_print_label = _print_utility_label_from_key(settings.get('print_utility_mode', 'default'))
+            for utility_label in _print_utility_labels(settings, print_capabilities):
+                destination_print_selector.listItems.add(utility_label, utility_label == selected_print_label, '')
+            destination_print_value = inputs.addStringValueInput(
+                'destination_print_utility_value',
+                'Custom Utility',
+                settings.get('print_utility_value', '')
+            )
+            browse_print_utility_button = inputs.addBoolValueInput(
+                'browse_print_utility',
+                'Choose Custom Utility…',
+                False,
+                '',
+                False
+            )
+            browse_print_utility_button.tooltip = 'Choose the application or executable Fusion should send the mesh to.'
 
             auto_sort_input = inputs.addBoolValueInput(
                 'auto_sort_after_export',
@@ -2203,7 +2524,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cad_group = inputs.addGroupCommandInput('cad_format_group', 'CAD / Solids')
             cad_group.isExpanded = bool(settings.get('cad_group_expanded', False))
             cad_inputs = cad_group.children
-            selected_formats = settings['formats']
+            selected_formats = settings.get('non_print_formats', settings['formats']) if settings.get('send_to_print_utility') else settings['formats']
             for key in MESH_FORMAT_KEYS:
                 mesh_inputs.addBoolValueInput(
                     f'format_{key}',
@@ -2303,7 +2624,11 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
     def notify(self, args):
+        global _format_sync_in_progress, _ignored_format_uncheck_events
         try:
+            if _ui_sync_in_progress:
+                return
+
             changed_input = args.input
             inputs = args.inputs
 
@@ -2322,6 +2647,21 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                     folder_input = adsk.core.StringValueCommandInput.cast(inputs.itemById(target_input_map[changed_input.id]))
                     folder_input.value = dialog.folder
                 button.value = False
+            elif changed_input.id == 'browse_print_utility':
+                button = adsk.core.BoolValueCommandInput.cast(changed_input)
+                dialog = _ui.createFileDialog()
+                dialog.title = 'Choose Print Utility'
+                dialog.filter = 'Applications and executables (*.app;*.exe);;All files (*)'
+                result = dialog.showOpen()
+                if result == adsk.core.DialogResults.DialogOK:
+                    print_value_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('destination_print_utility_value'))
+                    print_utility_value_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('print_destination_utility_value'))
+                    if print_value_input:
+                        print_value_input.value = dialog.filename
+                    if print_utility_value_input:
+                        print_utility_value_input.value = dialog.filename
+                if button:
+                    button.value = False
             elif changed_input.id == 'check_updates_now':
                 button = adsk.core.BoolValueCommandInput.cast(changed_input)
                 _refresh_update_ui(inputs, force_refresh=True, manual=True)
@@ -2349,8 +2689,51 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                     _ui.messageBox(message, COMMAND_NAME)
                     _refresh_update_ui(inputs, force_refresh=False, manual=False)
                 return
+            elif changed_input.id == 'destination_print_utility_mode':
+                dropdown = adsk.core.DropDownCommandInput.cast(changed_input)
+                print_utility_mode_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('print_destination_utility_mode'))
+                if print_utility_mode_input:
+                    selected_label = _dropdown_selected_label(dropdown)
+                    print_utility_mode_input.value = _print_utility_key_from_label(selected_label)
+            elif changed_input.id == 'destination_print_utility_value':
+                print_utility_value_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('print_destination_utility_value'))
+                if print_utility_value_input:
+                    print_utility_value_input.value = _read_string_input(inputs, 'destination_print_utility_value') or ''
+            elif changed_input.id == 'destination_print_format':
+                print_format_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('print_destination_format'))
+                if print_format_input:
+                    print_format_input.value = _print_destination_format_from_inputs(inputs, MESH_FORMAT_KEYS[0])
             elif changed_input.id.startswith('format_'):
                 format_key = changed_input.id.replace('format_', '', 1)
+                if _destination_mode_from_inputs(inputs) == 'print_utility' and format_key in MESH_FORMAT_KEYS:
+                    if _format_sync_in_progress:
+                        return
+                    changed_checkbox = adsk.core.BoolValueCommandInput.cast(changed_input)
+                    print_format_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('print_destination_format'))
+                    if format_key in _ignored_format_uncheck_events and changed_checkbox and not changed_checkbox.value:
+                        _ignored_format_uncheck_events.discard(format_key)
+                        return
+                    active_format = _print_destination_format_from_inputs(inputs, MESH_FORMAT_KEYS[0])
+                    if changed_checkbox and not changed_checkbox.value and format_key == active_format:
+                        if print_format_input and print_format_input.value == format_key:
+                            try:
+                                _format_sync_in_progress = True
+                                changed_checkbox.value = True
+                            finally:
+                                _format_sync_in_progress = False
+                        return
+                    if print_format_input:
+                        print_format_input.value = format_key
+                    try:
+                        _format_sync_in_progress = True
+                        for mesh_key in MESH_FORMAT_KEYS:
+                            checkbox = adsk.core.BoolValueCommandInput.cast(inputs.itemById(f'format_{mesh_key}'))
+                            if checkbox:
+                                if mesh_key != format_key and checkbox.value:
+                                    _ignored_format_uncheck_events.add(mesh_key)
+                                checkbox.value = mesh_key == format_key
+                    finally:
+                        _format_sync_in_progress = False
                 if format_key in CAD_FORMAT_KEYS and _target_mode_from_inputs(inputs) != 'visible_bodies':
                     cad_preferences_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('cad_format_preferences'))
                     if cad_preferences_input:
@@ -2407,6 +2790,8 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
 
             settings = _current_settings_from_inputs(inputs)
             open_after_export = bool(settings.get('open_folder_after_export', True))
+            if any(_settings_for_format(settings, format_key).get('send_to_print_utility') for format_key in settings['formats']):
+                open_after_export = False
             design = _active_design()
             target_mode = settings.get('target_mode', 'selection')
             geometry = _target_geometry(settings, inputs)
@@ -2446,6 +2831,13 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                     os.makedirs(export_folder, exist_ok=True)
                     export_path = os.path.join(
                         export_folder,
+                        '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
+                    )
+                elif format_key == 'obj':
+                    if temp_staging_dir is None:
+                        temp_staging_dir = tempfile.mkdtemp(prefix='better-export-')
+                    export_path = os.path.join(
+                        temp_staging_dir,
                         '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
                     )
 
