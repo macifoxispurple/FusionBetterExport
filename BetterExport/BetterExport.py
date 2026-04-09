@@ -79,7 +79,8 @@ GENERAL_DEFAULTS = {
     'sorted_output_folder': os.path.expanduser('~'),
     'auto_sort_after_export': False,
     'allow_overwrite': True,
-    'project_export_folders': {}
+    'project_export_folders': {},
+    'project_auto_sort_preferences': {}
 }
 
 DEFAULT_SETTINGS = {
@@ -165,6 +166,7 @@ def _merge_settings(values):
     merged['settings_mode'] = merged['settings_mode'] if merged.get('settings_mode') in SETTINGS_MODE_LABELS else 'global'
     merged['per_format_settings'] = _normalized_per_format_settings(merged.get('per_format_settings'))
     merged['project_export_folders'] = _normalized_project_export_folders(merged.get('project_export_folders'))
+    merged['project_auto_sort_preferences'] = _normalized_project_auto_sort_preferences(merged.get('project_auto_sort_preferences'))
     for key, default_value in GENERAL_DEFAULTS.items():
         merged[key] = merged.get(key, default_value)
     for key, default_value in OPTION_DEFAULTS.items():
@@ -176,16 +178,19 @@ def _load_settings():
     if not os.path.exists(SETTINGS_PATH):
         settings = dict(DEFAULT_SETTINGS)
         settings['folder'] = _folder_for_current_project(settings)
+        settings['auto_sort_after_export'] = _auto_sort_for_current_project(settings)
         return settings
 
     try:
         with open(SETTINGS_PATH, 'r', encoding='utf-8') as handle:
             settings = _merge_settings(json.load(handle))
             settings['folder'] = _folder_for_current_project(settings)
+            settings['auto_sort_after_export'] = _auto_sort_for_current_project(settings)
             return settings
     except Exception:
         settings = dict(DEFAULT_SETTINGS)
         settings['folder'] = _folder_for_current_project(settings)
+        settings['auto_sort_after_export'] = _auto_sort_for_current_project(settings)
         return settings
 
 
@@ -209,11 +214,16 @@ def _save_settings(values):
     settings['settings_mode'] = settings['settings_mode'] if settings.get('settings_mode') in SETTINGS_MODE_LABELS else 'global'
     settings['per_format_settings'] = _normalized_per_format_settings(settings.get('per_format_settings'))
     settings['project_export_folders'] = _normalized_project_export_folders(settings.get('project_export_folders'))
+    settings['project_auto_sort_preferences'] = _normalized_project_auto_sort_preferences(settings.get('project_auto_sort_preferences'))
     project_key = _current_project_key()
     if project_key and settings.get('folder'):
         settings['project_export_folders'][project_key] = settings['folder']
     if settings.get('folder'):
         settings['project_export_folders']['recent'] = settings['folder']
+    settings.pop('project_sorted_output_folders', None)
+    if project_key:
+        settings['project_auto_sort_preferences'][project_key] = bool(settings.get('auto_sort_after_export'))
+    settings['project_auto_sort_preferences']['recent'] = bool(settings.get('auto_sort_after_export'))
     settings['filename'] = ''
     for format_key in FORMAT_LABELS:
         if format_key in settings['per_format_settings']:
@@ -241,6 +251,16 @@ def _normalized_project_export_folders(value):
     for key, folder in value.items():
         if isinstance(key, str) and isinstance(folder, str) and key.strip() and folder.strip():
             normalized[key.strip()] = folder.strip()
+    return normalized
+
+
+def _normalized_project_auto_sort_preferences(value):
+    if not isinstance(value, dict):
+        return {}
+    normalized = {}
+    for key, enabled in value.items():
+        if isinstance(key, str) and key.strip():
+            normalized[key.strip()] = bool(enabled)
     return normalized
 
 
@@ -281,6 +301,16 @@ def _folder_for_current_project(settings):
     if 'recent' in project_folders:
         return project_folders['recent']
     return settings.get('folder', GENERAL_DEFAULTS['folder'])
+
+
+def _auto_sort_for_current_project(settings):
+    project_key = _current_project_key()
+    project_preferences = settings.get('project_auto_sort_preferences', {})
+    if project_key and project_key in project_preferences:
+        return bool(project_preferences[project_key])
+    if 'recent' in project_preferences:
+        return bool(project_preferences['recent'])
+    return bool(settings.get('auto_sort_after_export', GENERAL_DEFAULTS['auto_sort_after_export']))
 
 
 def _short_path(path_value):
@@ -641,6 +671,7 @@ def _current_settings_from_inputs(inputs):
 
 def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities, group_visible, auto_sort_enabled):
     group_input = adsk.core.GroupCommandInput.cast(command_inputs.itemById(_group_input_id(scope_key)))
+    refinement_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'mesh_refinement')))
     binary_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'binary_format')))
     one_per_body_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'one_file_per_body')))
     send_to_print_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'send_to_print_utility')))
@@ -651,6 +682,7 @@ def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities
 
     if (
         not group_input or
+        not refinement_input or
         not binary_input or
         not one_per_body_input or
         not send_to_print_input or
@@ -665,6 +697,7 @@ def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities
     if not group_visible:
         return
 
+    refinement_input.isVisible = capabilities['mesh_refinement']
     binary_input.isVisible = capabilities['binary_format']
     one_per_body_input.isVisible = capabilities['one_file_per_body']
     unit_input.isVisible = capabilities['unit_type']
@@ -932,7 +965,13 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         try:
             settings = _load_settings()
             current_project_key = _current_project_key()
-            if current_project_key and current_project_key not in settings.get('project_export_folders', {}):
+            needs_project_seed = bool(
+                current_project_key and (
+                    current_project_key not in settings.get('project_export_folders', {}) or
+                    current_project_key not in settings.get('project_auto_sort_preferences', {})
+                )
+            )
+            if needs_project_seed:
                 _save_settings(settings)
                 settings = _load_settings()
             cmd = args.command

@@ -22,11 +22,12 @@ This add-in is meant to make that process feel much less repetitive.
 - Remember your export preferences between Fusion launches
 - Use either one shared settings block or separate settings per format
 - Default the `File Name` field to the active Fusion document name each time the dialog opens
-- Remember the normal export folder per Fusion project, with a fallback to your most recently used folder
+- Remember the normal export folder and auto-sort preference per Fusion project, while keeping one global sorted-output folder for all automatically sorted exports
 - Add a toolbar button in Fusion's `Utilities` area when available
 - Add a right-click Browser context menu entry for exportable selections
 - Show export progress while the batch is running
 - Optionally auto-sort exported files into project folders after export
+- Hide mesh-only controls in `F3D` per-format settings, so that group only shows options Fusion actually supports
 
 ## Export sorting
 
