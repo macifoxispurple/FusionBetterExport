@@ -118,6 +118,7 @@ GENERAL_DEFAULTS = {
     'target_mode': 'selection',
     'f3d_enabled_preference': False,
     'auto_check_updates': True,
+    'run_on_startup': True,
     'allow_overwrite': True,
     'project_export_folders': {},
     'project_auto_sort_preferences': {},
@@ -231,6 +232,7 @@ def _load_settings():
         settings = dict(DEFAULT_SETTINGS)
         settings['folder'] = _folder_for_current_project(settings)
         settings['auto_sort_after_export'] = _auto_sort_for_current_project(settings)
+        settings['run_on_startup'] = _current_run_on_startup_enabled(settings.get('run_on_startup'))
         return settings
 
     try:
@@ -238,11 +240,13 @@ def _load_settings():
             settings = _merge_settings(json.load(handle))
             settings['folder'] = _folder_for_current_project(settings)
             settings['auto_sort_after_export'] = _auto_sort_for_current_project(settings)
+            settings['run_on_startup'] = _current_run_on_startup_enabled(settings.get('run_on_startup'))
             return settings
     except Exception:
         settings = dict(DEFAULT_SETTINGS)
         settings['folder'] = _folder_for_current_project(settings)
         settings['auto_sort_after_export'] = _auto_sort_for_current_project(settings)
+        settings['run_on_startup'] = _current_run_on_startup_enabled(settings.get('run_on_startup'))
         return settings
 
 
@@ -579,6 +583,17 @@ def _script_item_for_addin():
     return _safe_call(lambda: scripts.itemByPath(ADDIN_DIR))
 
 
+def _current_run_on_startup_enabled(default_value=None):
+    script_item = _script_item_for_addin()
+    if script_item and bool(_safe_call(lambda: script_item.isAddIn)):
+        current_value = _safe_call(lambda: script_item.isRunOnStartup)
+        if current_value is not None:
+            return bool(current_value)
+    if default_value is None:
+        return None
+    return bool(default_value)
+
+
 def _set_run_on_startup(enabled):
     script_item = _script_item_for_addin()
     if not script_item or not bool(_safe_call(lambda: script_item.isAddIn)):
@@ -822,6 +837,7 @@ def _read_general_settings(inputs):
     auto_sort_after_export = destination_mode == 'sorted'
     always_export_full_root = target_mode == 'full_design'
     auto_check_updates = _read_bool_input(inputs, 'auto_check_updates')
+    run_on_startup = _read_bool_input(inputs, 'run_on_startup')
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
     customize_per_format = _read_bool_input(inputs, 'customize_per_format')
     f3d_enabled_preference = _read_bool_input(inputs, 'f3d_enabled_preference')
@@ -830,6 +846,7 @@ def _read_general_settings(inputs):
         folder,
         sorted_output_folder,
         auto_check_updates,
+        run_on_startup,
         allow_overwrite,
         customize_per_format,
         f3d_enabled_preference
@@ -844,6 +861,7 @@ def _read_general_settings(inputs):
         'target_mode': target_mode,
         'f3d_enabled_preference': f3d_enabled_preference,
         'auto_check_updates': auto_check_updates,
+        'run_on_startup': run_on_startup,
         'allow_overwrite': allow_overwrite,
         'settings_mode': 'per_format' if customize_per_format else 'global'
     }
@@ -1461,14 +1479,18 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
     status_input = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('update_status'))
     auto_check_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('auto_check_updates'))
     update_now_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('update_now'))
+    run_on_startup_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('run_on_startup'))
 
-    if not status_input or not auto_check_input or not update_now_input:
+    if not status_input or not auto_check_input or not update_now_input or not run_on_startup_input:
         return
 
     update_state = _current_update_state()
     current_version = _current_addin_version()
     display_version = str(update_state.get('installed_version') or current_version).strip() if update_state.get('state') in (STATE_STAGED, STATE_FAILED) else current_version
     auto_check_enabled = bool(auto_check_input.value)
+    current_startup_enabled = _current_run_on_startup_enabled(run_on_startup_input.value)
+    run_on_startup_input.value = bool(current_startup_enabled)
+    run_on_startup_input.isEnabled = update_state.get('state') != STATE_STAGED
 
     if update_state.get('state') == STATE_STAGED:
         status_input.isVisible = True
@@ -1796,7 +1818,21 @@ def _add_option_inputs(container, scope_key, option_values, label):
 class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
+            had_settings_file = os.path.exists(SETTINGS_PATH)
             settings = _upgrade_settings_file()
+            current_run_on_startup = _current_run_on_startup_enabled(settings.get('run_on_startup'))
+            if not had_settings_file:
+                desired_run_on_startup = bool(settings.get('run_on_startup', True))
+                try:
+                    _set_run_on_startup(desired_run_on_startup)
+                    current_run_on_startup = desired_run_on_startup
+                except Exception:
+                    pass
+                settings['run_on_startup'] = current_run_on_startup
+                _save_settings(settings)
+                settings = _load_settings()
+            else:
+                settings['run_on_startup'] = current_run_on_startup
             current_project_key = _current_project_key()
             needs_project_seed = bool(
                 current_project_key and (
@@ -1981,6 +2017,14 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             inputs.addBoolValueInput('check_updates_now', 'Check For Updates', False, '', False)
             update_now_input = inputs.addBoolValueInput('update_now', 'Update Now', False, '', False)
             update_now_input.isVisible = False
+            run_on_startup_input = inputs.addBoolValueInput(
+                'run_on_startup',
+                'Run On Startup',
+                True,
+                '',
+                bool(settings.get('run_on_startup', True))
+            )
+            run_on_startup_input.tooltip = 'Launch Better Export automatically when Fusion starts.'
 
             _sync_ui(inputs)
             _refresh_update_ui(inputs, force_refresh=False, manual=False)
@@ -2030,6 +2074,10 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 button = adsk.core.BoolValueCommandInput.cast(changed_input)
                 _refresh_update_ui(inputs, force_refresh=True, manual=True)
                 button.value = False
+            elif changed_input.id == 'run_on_startup':
+                checkbox = adsk.core.BoolValueCommandInput.cast(changed_input)
+                if checkbox:
+                    _set_run_on_startup(bool(checkbox.value))
             elif changed_input.id == 'update_now':
                 button = adsk.core.BoolValueCommandInput.cast(changed_input)
                 if button:
@@ -2040,17 +2088,13 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 if not latest_version or not _is_version_newer(latest_version, current_version):
                     _show_error('No newer release is available right now.')
                 else:
-                    _set_run_on_startup(True)
-                    _stage_update_payload(release_info)
-                    _ui.messageBox(
-                        'Better Export v{} has been downloaded and staged.\n\n'
-                        'Run on Startup has been enabled for Better Export so Fusion can finish the update on next launch.\n\n'
-                        'You can finish your exports in the current session.\n\n'
-                        'Restart Fusion when convenient to apply the update.'.format(
-                            latest_version
-                        ),
-                        COMMAND_NAME
-                    )
+                    update_info = _stage_update_payload(release_info)
+                    startup_was_enabled = bool(update_info.get('previous_run_on_startup'))
+                    message = 'Better Export v{} has been downloaded and staged.\n\n'.format(latest_version)
+                    if not startup_was_enabled:
+                        message += 'Run on Startup has been enabled for Better Export so Fusion can finish the update on next launch.\n\n'
+                    message += 'You can finish your exports in the current session.\n\nRestart Fusion when convenient to apply the update.'
+                    _ui.messageBox(message, COMMAND_NAME)
                     _refresh_update_ui(inputs, force_refresh=False, manual=False)
                 return
             elif changed_input.id == 'format_f3d':
