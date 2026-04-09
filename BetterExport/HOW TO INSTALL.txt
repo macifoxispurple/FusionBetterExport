@@ -17,7 +17,7 @@ macOS default add-in folder:
 ~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/
 
 Windows default add-in folder:
-%AppData%\Autodesk\Autodesk Fusion\API\AddIns\
+%AppData%\Autodesk\Autodesk Fusion 360\API\AddIns\
 
 Installation by copy:
 1. Download and unzip this package.
