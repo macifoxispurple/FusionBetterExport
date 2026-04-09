@@ -84,6 +84,7 @@ GENERAL_DEFAULTS = {
     'folder': os.path.expanduser('~'),
     'sorted_output_folder': os.path.expanduser('~'),
     'auto_sort_after_export': False,
+    'always_export_full_root': False,
     'auto_check_updates': True,
     'allow_overwrite': True,
     'project_export_folders': {},
@@ -522,6 +523,7 @@ def _read_general_settings(inputs):
     folder = _read_string_input(inputs, 'folder')
     sorted_output_folder = _read_string_input(inputs, 'sorted_output_folder')
     auto_sort_after_export = _read_bool_input(inputs, 'auto_sort_after_export')
+    always_export_full_root = _read_bool_input(inputs, 'always_export_full_root')
     auto_check_updates = _read_bool_input(inputs, 'auto_check_updates')
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
 
@@ -529,6 +531,7 @@ def _read_general_settings(inputs):
         folder,
         sorted_output_folder,
         auto_sort_after_export,
+        always_export_full_root,
         auto_check_updates,
         allow_overwrite
     ):
@@ -538,6 +541,7 @@ def _read_general_settings(inputs):
         'folder': folder,
         'sorted_output_folder': sorted_output_folder,
         'auto_sort_after_export': auto_sort_after_export,
+        'always_export_full_root': always_export_full_root,
         'auto_check_updates': auto_check_updates,
         'allow_overwrite': allow_overwrite
     }
@@ -624,6 +628,118 @@ def _geometry_is_exportable(entity):
         return _component_has_bodies(component)
 
     return False
+
+
+def _body_collections_for_component(component):
+    component = adsk.fusion.Component.cast(component)
+    if not component:
+        return []
+
+    collections = []
+    for attribute_name in ('bRepBodies', 'meshBodies'):
+        collection = _safe_call(lambda name=attribute_name: getattr(component, name))
+        if collection:
+            collections.append(collection)
+    return collections
+
+
+def _collect_full_root_state(component, visited=None, state=None):
+    component = adsk.fusion.Component.cast(component)
+    if not component:
+        return state or {'occurrences': [], 'bodies': []}
+
+    visited = visited or set()
+    state = state or {'occurrences': [], 'bodies': []}
+
+    token = _safe_call(lambda: component.entityToken) or str(id(component))
+    if token in visited:
+        return state
+    visited.add(token)
+
+    for collection in _body_collections_for_component(component):
+        count = _safe_call(lambda c=collection: c.count) or 0
+        for index in range(count):
+            body = _safe_call(lambda c=collection, i=index: c.item(i))
+            if body:
+                state['bodies'].append((body, bool(_safe_call(lambda b=body: b.isLightBulbOn))))
+
+    occurrences = _safe_call(lambda: component.occurrences)
+    count = _safe_call(lambda o=occurrences: o.count) or 0
+    for index in range(count):
+        occurrence = _safe_call(lambda o=occurrences, i=index: o.item(i))
+        if not occurrence:
+            continue
+        state['occurrences'].append((
+            occurrence,
+            bool(_safe_call(lambda occ=occurrence: occ.isLightBulbOn)),
+            bool(_safe_call(lambda occ=occurrence: occ.isIsolated))
+        ))
+        child_component = _safe_call(lambda occ=occurrence: occ.component)
+        _collect_full_root_state(child_component, visited, state)
+
+    return state
+
+
+def _restore_full_root_state(design, saved_state):
+    if not saved_state:
+        return
+
+    for body, was_visible in reversed(saved_state.get('bodies', [])):
+        try:
+            body.isLightBulbOn = was_visible
+        except Exception:
+            pass
+
+    for occurrence, was_visible, was_isolated in reversed(saved_state.get('occurrences', [])):
+        try:
+            occurrence.isLightBulbOn = was_visible
+        except Exception:
+            pass
+        try:
+            occurrence.isIsolated = was_isolated
+        except Exception:
+            pass
+
+    active_occurrence = saved_state.get('active_occurrence')
+    try:
+        if active_occurrence:
+            active_occurrence.activate()
+        elif design:
+            design.activateRootComponent()
+    except Exception:
+        pass
+
+
+def _prepare_full_root_export(design):
+    root_component = _root_component()
+    if not design or not root_component:
+        return None
+
+    saved_state = _collect_full_root_state(root_component)
+    saved_state['active_occurrence'] = _safe_call(lambda: design.activeOccurrence)
+
+    try:
+        design.activateRootComponent()
+    except Exception:
+        pass
+
+    for occurrence, _, _ in saved_state.get('occurrences', []):
+        try:
+            occurrence.isIsolated = False
+        except Exception:
+            pass
+        try:
+            occurrence.isLightBulbOn = True
+        except Exception:
+            pass
+
+    for body, _ in saved_state.get('bodies', []):
+        try:
+            body.isLightBulbOn = True
+        except Exception:
+            pass
+
+    return saved_state
 
 
 def _mesh_refinement_enum(setting_key):
@@ -1078,13 +1194,14 @@ def _validate_inputs(command_inputs):
     if not design:
         return False, 'Open a Fusion design before using this command.'
 
-    geometry = _selected_geometry(command_inputs)
+    settings = _current_settings_from_inputs(command_inputs)
+    geometry = _root_component() if settings.get('always_export_full_root') else _selected_geometry(command_inputs)
     if not geometry:
         return False, 'Select a body, component, or occurrence, or keep a design active to export the root component.'
     if not _geometry_is_exportable(geometry):
+        if settings.get('always_export_full_root'):
+            return False, 'Nothing exportable was found in the active root design.'
         return False, 'Nothing exportable was found in the current selection or active design.'
-
-    settings = _current_settings_from_inputs(command_inputs)
 
     if not settings['formats']:
         return False, 'Select at least one export format.'
@@ -1093,6 +1210,8 @@ def _validate_inputs(command_inputs):
         format_geometry = _geometry_for_format(format_key, geometry)
         if not format_geometry or not _geometry_is_exportable(format_geometry):
             if format_key == 'f3d':
+                if settings.get('always_export_full_root'):
+                    return False, 'F3D export could not find exportable geometry in the active root design.'
                 return False, 'F3D export requires a component, occurrence, or body selection with actual model geometry, or an active root component with bodies.'
             return False, 'Nothing exportable was found for {} in the current selection or active design.'.format(FORMAT_LABELS[format_key])
 
@@ -1234,6 +1353,14 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 True
             )
 
+            full_root_input = inputs.addBoolValueInput(
+                'always_export_full_root',
+                'Always Export Full Design',
+                True,
+                '',
+                bool(settings['always_export_full_root'])
+            )
+            full_root_input.tooltip = 'Ignore the current selection, temporarily activate the root component, unisolate everything, and show all bodies before exporting.'
             inputs.addBoolValueInput(
                 'auto_sort_after_export',
                 'Sort Automatically After Export',
@@ -1391,6 +1518,8 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
         progress_dialog = None
         export_succeeded = False
         temp_staging_dir = None
+        full_root_state = None
+        design = None
         try:
             inputs = args.command.commandInputs
             valid, message = _validate_inputs(inputs)
@@ -1398,10 +1527,11 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 raise ValueError(message)
 
             settings = _current_settings_from_inputs(inputs)
-
-            geometry = _selected_geometry(inputs)
-
             design = _active_design()
+            geometry = _root_component() if settings['always_export_full_root'] else _selected_geometry(inputs)
+            if settings['always_export_full_root']:
+                full_root_state = _prepare_full_root_export(design)
+
             total_exports = len(settings['formats'])
             progress_dialog = _ui.createProgressDialog() if _ui else None
             if progress_dialog:
@@ -1492,6 +1622,8 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                     shutil.rmtree(temp_staging_dir)
                 except Exception:
                     pass
+            if full_root_state:
+                _restore_full_root_state(design or _active_design(), full_root_state)
 
 
 class DestroyHandler(adsk.core.CommandEventHandler):

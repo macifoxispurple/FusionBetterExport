@@ -22,6 +22,7 @@ This add-in is meant to make that process feel much less repetitive.
 - Remember the settings and folders you actually use, so repeat exports take much less setup
 - Let you choose between a simple direct-export workflow and an automatic sort-and-organize workflow
 - Keep per-project behavior where it matters, like normal export folders and whether a given file should auto-sort
+- Optionally ignore the current selection and export the full visible design from the root instead
 - Support either one shared settings block or separate settings per format, depending on how much control you want
 - Fit into Fusion more naturally with a toolbar button, Browser context-menu entry, and visible export progress while the batch runs
 
@@ -122,6 +123,7 @@ If nothing is selected, the add-in exports the active root component.
 - Settings are stored locally in `BetterExport/settings.json`.
 - Most preferences save as soon as you change them, even if you close the dialog without exporting.
 - `File Name` is intentionally not persisted. It refreshes from the active Fusion document each time the dialog opens.
+- If you turn on `Always Export Full Design`, the add-in temporarily exports from the root component instead of the current selection and then restores the previous view state afterward.
 - The add-in can let you know when a newer release is available, and you can also check manually from inside Fusion whenever you want.
 - Fusion's API support varies a bit by version, so some options are shown only when your installed Fusion build exposes them.
 
