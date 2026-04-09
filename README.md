@@ -7,7 +7,8 @@
 - Exposes STL, OBJ, 3MF, and F3D export in one command, including multi-select export in a single run.
 - Supports either one shared export settings block or per-format settings blocks, depending on the selected `Settings Scope`.
 - Can export into an automatic temporary staging folder and then sort results into project folders under a separate output root.
-- Remembers the last-used export folder, sorted-output folder, file name, format, mesh refinement, unit choice, and print utility settings.
+- Remembers the last-used export folder, sorted-output folder, format, mesh refinement, unit choice, and print utility settings.
+- Uses the active Fusion document name as the default `File Name` each time the dialog opens.
 - Remembers the normal `Export Folder` per Fusion project by using the document base name with version tokens stripped.
 - Supports custom refinement values for:
   - surface deviation
@@ -50,4 +51,4 @@ The command appears as `Better Export` in a `Better Export` panel on the `Utilit
 - `BetterExport/BetterExport.py`: add-in implementation
 - `BetterExport/export_sorter.py`: staging-folder sorter implementation
 - `BetterExport/BetterExport.manifest`: Fusion add-in manifest
-- `BetterExport/settings.json`: created automatically after the first successful export
+- `BetterExport/settings.json`: created automatically when settings are changed or after an export
