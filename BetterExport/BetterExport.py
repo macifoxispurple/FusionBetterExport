@@ -450,6 +450,36 @@ def _format_extension(format_key):
     return extension_map.get(format_key, format_key)
 
 
+def _three_mf_has_triangles(path):
+    try:
+        with zipfile.ZipFile(path, 'r') as archive:
+            model_names = [name for name in archive.namelist() if name.lower().endswith('.model')]
+            for model_name in model_names:
+                model_bytes = archive.read(model_name)
+                if b'<triangle ' in model_bytes or b'<triangle>' in model_bytes or b'<triangle\t' in model_bytes:
+                    return True
+    except Exception:
+        return True
+    return False
+
+
+def _remove_empty_visible_body_3mf_outputs(export_folder, filename_prefix):
+    if not export_folder or not os.path.isdir(export_folder):
+        return
+    prefix = '{}'.format(filename_prefix or '').lower()
+    for entry_name in os.listdir(export_folder):
+        if not entry_name.lower().endswith('.3mf'):
+            continue
+        if prefix and not entry_name.lower().startswith(prefix):
+            continue
+        entry_path = os.path.join(export_folder, entry_name)
+        if os.path.isfile(entry_path) and not _three_mf_has_triangles(entry_path):
+            try:
+                os.remove(entry_path)
+            except Exception:
+                pass
+
+
 def _sorted_project_folder_for_settings(settings):
     if not settings.get('auto_sort_after_export'):
         return settings.get('folder', '')
@@ -2439,6 +2469,12 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                     success = design.exportManager.execute(options)
                 if not success:
                     raise RuntimeError('Fusion reported that the {} export did not complete.'.format(FORMAT_LABELS[format_key]))
+
+                if format_key == '3mf' and target_mode == 'visible_bodies' and export_path:
+                    _remove_empty_visible_body_3mf_outputs(
+                        os.path.dirname(export_path),
+                        format_settings['filename']
+                    )
 
                 if progress_dialog:
                     progress_dialog.progressValue = index
