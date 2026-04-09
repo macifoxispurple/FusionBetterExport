@@ -2016,16 +2016,8 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 if not latest_version or not _is_version_newer(latest_version, current_version):
                     _show_error('No newer release is available right now.')
                 else:
-                    update_info = _stage_update_payload(release_info)
-                    cycled, cycle_error = _try_cycle_addin_after_staging()
-                    if _ui and not cycled:
-                        _ui.messageBox(
-                            'Better Export v{} has been downloaded and staged.\n\nFusion could not automatically cycle the add-in from inside the current command.\n\nDisable and enable Better Export once to apply the update. If Fusion does not restart it automatically after that, disable and enable it one more time to use the new version.\n\nReason: {}'.format(
-                                update_info['latest_version'],
-                                cycle_error or 'Unknown restart error'
-                            ),
-                            COMMAND_NAME
-                        )
+                    _stage_update_payload(release_info)
+                    _try_cycle_addin_after_staging()
                 return
             elif changed_input.id == 'format_f3d':
                 f3d_checkbox = adsk.core.BoolValueCommandInput.cast(changed_input)
