@@ -2,7 +2,7 @@
 
 Better Export is a Fusion add-in for people who are tired of setting the same export options over and over again.
 
-It pulls STL, OBJ, 3MF, and F3D export into one place, remembers the settings you care about, and can optionally sort the exported files into tidy project folders afterward.
+It pulls common mesh and CAD export formats into one place, remembers the settings you care about, and can optionally sort exported files into tidy project folders afterward.
 
 ## Why I made it
 
@@ -17,7 +17,7 @@ This add-in is meant to make that process feel much less repetitive.
 
 ## What it can do
 
-- Export `STL`, `OBJ`, `3MF`, and `F3D` from one command instead of bouncing between separate Fusion export flows
+- Export `STL`, `OBJ`, `3MF`, `F3D`, `IGES`, `SAT`, `SMT`, `STEP`, and `USDZ` from one command instead of bouncing between separate Fusion export flows
 - Export multiple output types in a single pass when you need more than one format from the same design
 - Remember the settings and folders you actually use, so repeat exports take much less setup
 - Let you choose between a simple direct-export workflow and an automatic sort-and-organize workflow
@@ -25,6 +25,7 @@ This add-in is meant to make that process feel much less repetitive.
 - Choose whether to export the full design, only currently visible bodies, or a specific selection
 - Support either one shared settings block or separate settings per format, depending on how much control you want
 - Optionally open the export destination folder automatically after a successful export
+- Keep mesh formats front and center while tucking CAD / Solids formats into a separate section
 - Fit into Fusion more naturally with a toolbar button, Browser context-menu entry, and visible export progress while the batch runs
 
 ## Export sorting
@@ -42,6 +43,13 @@ The sorter currently handles:
 - `.obj`
 - `.mtl`
 - `.f3d`
+- `.iges`
+- `.igs`
+- `.sat`
+- `.smt`
+- `.step`
+- `.stp`
+- `.usdz`
 
 The sorting pass can:
 
@@ -66,31 +74,31 @@ If `Sorted Projects Folder` is set to `~/Documents/Fusion Exports`, the add-in m
 ~/Documents/Fusion Exports/
 ├── DeskCableClip/
 │   ├── DeskCableClip.f3d
-│   ├── 3MFs/
+│   ├── 3MF/
 │   │   └── DeskCableClip_MainBody.3mf
-│   ├── F3Ds/
+│   ├── F3D/
 │   │   ├── DeskCableClip v4.f3d
 │   │   └── DeskCableClip v5.f3d
-│   ├── OBJs/
+│   ├── OBJ/
 │   │   ├── DeskCableClip_MainBody.mtl
 │   │   └── DeskCableClip_MainBody.obj
-│   └── STLs/
+│   └── STL/
 │       └── DeskCableClip_MainBody.stl
 └── LampArmBracket/
     ├── LampArmBracket.f3d
-    ├── F3Ds/
+    ├── F3D/
     │   ├── LampArmBracket v2.f3d
     │   └── LampArmBracket v3.f3d
-    └── STLs/
+    └── STL/
         └── LampArmBracket_45deg.stl
 ```
 
 A few things to notice:
 
 - project folders are created from the cleaned filename prefix before the first underscore
-- mesh files are sorted into `STLs`, `3MFs`, or `OBJs`
+- exported files are sorted into type-specific folders like `STL`, `3MF`, `OBJ`, `STEP`, or `USDZ`
 - `.mtl` files are kept beside their matching `.obj`
-- original `.f3d` files are archived in `F3Ds`
+- original `.f3d` files are archived in `F3D`
 - the highest-version `.f3d` also gets one cleaned top-level copy in the project folder
 
 ## Install

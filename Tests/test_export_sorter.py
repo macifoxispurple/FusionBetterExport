@@ -31,8 +31,8 @@ class ExportSorterTests(unittest.TestCase):
 
         process_exports(str(self.input_dir), str(self.output_dir))
 
-        normalized_obj = self.output_dir / "SwitchHeadboardHolder" / "OBJs" / "SwitchHeadboardHolder_SwitchHeadboardHolder_Screw_1_Body1.obj"
-        normalized_mtl = self.output_dir / "SwitchHeadboardHolder" / "OBJs" / "SwitchHeadboardHolder_SwitchHeadboardHolder_Screw_1_Body1.mtl"
+        normalized_obj = self.output_dir / "SwitchHeadboardHolder" / "OBJ" / "SwitchHeadboardHolder_SwitchHeadboardHolder_Screw_1_Body1.obj"
+        normalized_mtl = self.output_dir / "SwitchHeadboardHolder" / "OBJ" / "SwitchHeadboardHolder_SwitchHeadboardHolder_Screw_1_Body1.mtl"
 
         self.assertTrue(normalized_obj.exists())
         self.assertTrue(normalized_mtl.exists())
@@ -46,7 +46,7 @@ class ExportSorterTests(unittest.TestCase):
     def test_conflict_overwrite_replaces_existing_destination(self):
         (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
 
-        existing = self.output_dir / "DeskClip" / "STLs" / "DeskClip.stl"
+        existing = self.output_dir / "DeskClip" / "STL" / "DeskClip.stl"
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text("old-stl", encoding="utf-8")
 
@@ -62,7 +62,7 @@ class ExportSorterTests(unittest.TestCase):
     def test_conflict_keep_both_preserves_versioned_name(self):
         (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
 
-        existing = self.output_dir / "DeskClip" / "STLs" / "DeskClip.stl"
+        existing = self.output_dir / "DeskClip" / "STL" / "DeskClip.stl"
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text("old-stl", encoding="utf-8")
 
@@ -73,7 +73,7 @@ class ExportSorterTests(unittest.TestCase):
             conflict_resolver=lambda source, target, operation, keep_both_target: "keep_both"
         )
 
-        kept_both = self.output_dir / "DeskClip" / "STLs" / "DeskClip v2.stl"
+        kept_both = self.output_dir / "DeskClip" / "STL" / "DeskClip v2.stl"
         self.assertEqual(result["conflicts_kept_both"], 1)
         self.assertTrue(existing.exists())
         self.assertTrue(kept_both.exists())
@@ -82,7 +82,7 @@ class ExportSorterTests(unittest.TestCase):
     def test_conflict_skip_leaves_existing_destination_untouched(self):
         (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
 
-        existing = self.output_dir / "DeskClip" / "STLs" / "DeskClip.stl"
+        existing = self.output_dir / "DeskClip" / "STL" / "DeskClip.stl"
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text("old-stl", encoding="utf-8")
 
@@ -96,12 +96,12 @@ class ExportSorterTests(unittest.TestCase):
         self.assertEqual(result["conflicts_skipped"], 1)
         self.assertEqual(result["skipped_overwrite"], 1)
         self.assertEqual(existing.read_text(encoding="utf-8"), "old-stl")
-        self.assertFalse((self.output_dir / "DeskClip" / "STLs" / "DeskClip v2.stl").exists())
+        self.assertFalse((self.output_dir / "DeskClip" / "STL" / "DeskClip v2.stl").exists())
 
     def test_scan_export_conflicts_detects_existing_sorted_target(self):
         (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
 
-        existing = self.output_dir / "DeskClip" / "STLs" / "DeskClip.stl"
+        existing = self.output_dir / "DeskClip" / "STL" / "DeskClip.stl"
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text("old-stl", encoding="utf-8")
 
@@ -110,6 +110,16 @@ class ExportSorterTests(unittest.TestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(conflicts[0]["incoming_name"], "DeskClip.stl")
         self.assertEqual(conflicts[0]["existing_name"], "DeskClip.stl")
+
+    def test_step_file_is_sorted_into_project_step_folder(self):
+        (self.input_dir / "DeskClip v2.step").write_text("step-data", encoding="utf-8")
+
+        result = process_exports(str(self.input_dir), str(self.output_dir))
+
+        sorted_step = self.output_dir / "DeskClip" / "STEP" / "DeskClip.step"
+        self.assertTrue(sorted_step.exists())
+        self.assertEqual(sorted_step.read_text(encoding="utf-8"), "step-data")
+        self.assertEqual(result["moved_mesh_files"], 1)
 
 
 if __name__ == "__main__":

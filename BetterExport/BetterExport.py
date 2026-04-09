@@ -41,7 +41,7 @@ from update_state import (
 
 COMMAND_ID = 'betterMeshExportCommand'
 COMMAND_NAME = 'Better Export'
-COMMAND_DESCRIPTION = 'Export STL, OBJ, 3MF, and F3D with persistent settings.'
+COMMAND_DESCRIPTION = 'Export mesh and CAD formats from Fusion with persistent settings.'
 WORKSPACE_ID = 'FusionSolidEnvironment'
 FALLBACK_PANEL_ID = 'SolidScriptsAddinsPanel'
 UTILITIES_PANEL_ID = 'BetterExportPanel'
@@ -66,8 +66,16 @@ FORMAT_LABELS = {
     'stl': 'STL',
     'obj': 'OBJ',
     '3mf': '3MF',
-    'f3d': 'F3D'
+    'f3d': 'F3D',
+    'iges': 'IGES',
+    'sat': 'SAT',
+    'smt': 'SMT',
+    'step': 'STEP',
+    'usd': 'USDZ'
 }
+
+MESH_FORMAT_KEYS = ('stl', 'obj', '3mf')
+CAD_FORMAT_KEYS = ('f3d', 'iges', 'sat', 'smt', 'step', 'usd')
 
 MESH_REFINEMENT_LABELS = {
     'high': 'High',
@@ -127,6 +135,8 @@ GENERAL_DEFAULTS = {
     'run_on_startup': True,
     'allow_overwrite': True,
     'open_folder_after_export': True,
+    'mesh_group_expanded': True,
+    'cad_group_expanded': False,
     'project_export_folders': {},
     'project_auto_sort_preferences': {},
     'update_check': {}
@@ -428,7 +438,16 @@ def _sanitize_filename(name):
 
 
 def _format_extension(format_key):
-    return '3mf' if format_key == '3mf' else format_key
+    extension_map = {
+        '3mf': '3mf',
+        'f3d': 'f3d',
+        'iges': 'iges',
+        'sat': 'sat',
+        'smt': 'smt',
+        'step': 'step',
+        'usd': 'usdz',
+    }
+    return extension_map.get(format_key, format_key)
 
 
 def _sorted_project_folder_for_settings(settings):
@@ -878,6 +897,10 @@ def _read_general_settings(inputs):
     open_folder_after_export = _read_bool_input(inputs, 'open_folder_after_export')
     customize_per_format = _read_bool_input(inputs, 'customize_per_format')
     f3d_enabled_preference = _read_bool_input(inputs, 'f3d_enabled_preference')
+    mesh_group_input = adsk.core.GroupCommandInput.cast(inputs.itemById('mesh_format_group'))
+    cad_group_input = adsk.core.GroupCommandInput.cast(inputs.itemById('cad_format_group'))
+    mesh_group_expanded = bool(mesh_group_input.isExpanded) if mesh_group_input else GENERAL_DEFAULTS['mesh_group_expanded']
+    cad_group_expanded = bool(cad_group_input.isExpanded) if cad_group_input else GENERAL_DEFAULTS['cad_group_expanded']
 
     if None in (
         folder,
@@ -902,6 +925,8 @@ def _read_general_settings(inputs):
         'run_on_startup': run_on_startup,
         'allow_overwrite': allow_overwrite,
         'open_folder_after_export': open_folder_after_export,
+        'mesh_group_expanded': mesh_group_expanded,
+        'cad_group_expanded': cad_group_expanded,
         'settings_mode': 'per_format' if customize_per_format else 'global'
     }
 
@@ -938,7 +963,7 @@ def _target_geometry(settings, inputs):
 
 
 def _geometry_for_format(format_key, geometry):
-    if format_key != 'f3d':
+    if format_key in MESH_FORMAT_KEYS:
         return geometry
 
     if not geometry:
@@ -1202,7 +1227,7 @@ def _distance_unit_enum(unit_key):
     return fallback.get(unit_key)
 
 
-def _create_export_options(format_key, geometry, filename=''):
+def _create_export_options(format_key, geometry, filename='', root_export=False):
     design = _active_design()
     export_manager = design.exportManager
 
@@ -1214,8 +1239,99 @@ def _create_export_options(format_key, geometry, filename=''):
         return export_manager.createC3MFExportOptions(geometry, filename)
     if format_key == 'f3d':
         return export_manager.createFusionArchiveExportOptions(filename, geometry)
+    if root_export and format_key == 'sat':
+        return export_manager.createSATExportOptions(filename)
+    if root_export and format_key == 'smt':
+        return export_manager.createSMTExportOptions(filename)
+    if format_key == 'iges':
+        return export_manager.createIGESExportOptions(filename, geometry) if geometry else export_manager.createIGESExportOptions(filename)
+    if format_key == 'sat':
+        return export_manager.createSATExportOptions(filename, geometry) if geometry else export_manager.createSATExportOptions(filename)
+    if format_key == 'smt':
+        return export_manager.createSMTExportOptions(filename, geometry) if geometry else export_manager.createSMTExportOptions(filename)
+    if format_key == 'step':
+        return export_manager.createSTEPExportOptions(filename, geometry) if geometry else export_manager.createSTEPExportOptions(filename)
+    if format_key == 'usd':
+        return export_manager.createUSDExportOptions(filename, geometry) if geometry else export_manager.createUSDExportOptions(filename)
 
     raise ValueError(f'Unsupported format: {format_key}')
+
+
+def _collect_brep_bodies_from_collection(collection):
+    bodies = []
+    count = _safe_call(lambda: collection.count) or 0
+    for index in range(count):
+        body = _safe_call(lambda i=index: collection.item(i))
+        if body:
+            bodies.append(body)
+    return bodies
+
+
+def _collect_brep_bodies_from_occurrence(occurrence):
+    bodies = []
+    occurrence = adsk.fusion.Occurrence.cast(occurrence)
+    if not occurrence:
+        return bodies
+
+    occurrence_bodies = _safe_call(lambda: occurrence.bRepBodies)
+    if occurrence_bodies:
+        bodies.extend(_collect_brep_bodies_from_collection(occurrence_bodies))
+
+    child_occurrences = _safe_call(lambda: occurrence.childOccurrences)
+    child_count = _safe_call(lambda: child_occurrences.count) or 0
+    for index in range(child_count):
+        child_occurrence = _safe_call(lambda i=index: child_occurrences.item(i))
+        bodies.extend(_collect_brep_bodies_from_occurrence(child_occurrence))
+
+    return bodies
+
+
+def _collect_brep_bodies_for_export(geometry):
+    body = adsk.fusion.BRepBody.cast(geometry)
+    if body:
+        return [body]
+
+    occurrence = adsk.fusion.Occurrence.cast(geometry)
+    if occurrence:
+        return _collect_brep_bodies_from_occurrence(occurrence)
+
+    component = adsk.fusion.Component.cast(geometry)
+    if not component:
+        return []
+
+    bodies = []
+    component_bodies = _safe_call(lambda: component.bRepBodies)
+    if component_bodies:
+        bodies.extend(_collect_brep_bodies_from_collection(component_bodies))
+
+    all_occurrences = _safe_call(lambda: component.allOccurrences)
+    occurrence_count = _safe_call(lambda: all_occurrences.count) or 0
+    for index in range(occurrence_count):
+        occurrence = _safe_call(lambda i=index: all_occurrences.item(i))
+        occurrence_bodies = _safe_call(lambda occ=occurrence: occ.bRepBodies)
+        if occurrence_bodies:
+            bodies.extend(_collect_brep_bodies_from_collection(occurrence_bodies))
+
+    return bodies
+
+
+def _export_sat_or_smt_with_temporary_brep(format_key, geometry, filename):
+    if format_key not in {'sat', 'smt'}:
+        raise ValueError(f'Unsupported temporary BRep export format: {format_key}')
+    bodies = _collect_brep_bodies_for_export(geometry)
+    if not bodies:
+        raise ValueError('Fusion could not resolve B-Rep bodies for the {} export.'.format(FORMAT_LABELS[format_key]))
+    manager = adsk.fusion.TemporaryBRepManager.get()
+    if not manager:
+        raise RuntimeError('Fusion could not access the temporary B-Rep export manager.')
+    temporary_bodies = []
+    for body in bodies:
+        temporary_body = _safe_call(lambda b=body: manager.copy(b))
+        if temporary_body:
+            temporary_bodies.append(temporary_body)
+    if not temporary_bodies:
+        raise ValueError('Fusion could not create temporary B-Rep bodies for the {} export.'.format(FORMAT_LABELS[format_key]))
+    return bool(manager.exportToFile(temporary_bodies, filename))
 
 
 def _capability_probe_path(format_key):
@@ -1226,19 +1342,23 @@ def _capability_probe_path(format_key):
 
 
 def _capabilities_for(format_key, geometry):
-    probe_path = _capability_probe_path(format_key) if format_key in ('obj', '3mf', 'f3d') else ''
+    if format_key in CAD_FORMAT_KEYS:
+        return _empty_capabilities()
+
+    probe_path = _capability_probe_path(format_key) if format_key != 'stl' else ''
     try:
         options = _create_export_options(format_key, geometry, probe_path)
     except Exception:
+        is_mesh = format_key in MESH_FORMAT_KEYS
         return {
             'binary_format': format_key == 'stl',
-            'mesh_refinement': format_key != 'f3d',
-            'surface_deviation': format_key != 'f3d',
-            'normal_deviation': format_key != 'f3d',
-            'maximum_edge_length': format_key != 'f3d',
-            'aspect_ratio': format_key != 'f3d',
-            'unit_type': format_key != 'f3d',
-            'one_file_per_body': format_key != 'f3d',
+            'mesh_refinement': is_mesh,
+            'surface_deviation': is_mesh,
+            'normal_deviation': is_mesh,
+            'maximum_edge_length': is_mesh,
+            'aspect_ratio': is_mesh,
+            'unit_type': is_mesh,
+            'one_file_per_body': is_mesh,
             'send_to_print': False,
             'print_utility': False,
             'available_print_utilities': []
@@ -1432,8 +1552,7 @@ def _sync_ui(command_inputs):
     destination_mode_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('destination_mode'))
     destination_hint = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('destination_hint'))
     format_note = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('format_note'))
-    f3d_pref_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('f3d_enabled_preference'))
-    f3d_checkbox = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('format_f3d'))
+    cad_preferences_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('cad_format_preferences'))
     last_target_mode_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('last_target_mode'))
     folder_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('folder'))
     folder_summary = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('folder_summary'))
@@ -1452,8 +1571,7 @@ def _sync_ui(command_inputs):
         not destination_mode_input or
         not destination_hint or
         not format_note or
-        not f3d_pref_input or
-        not f3d_checkbox or
+        not cad_preferences_input or
         not last_target_mode_input or
         not folder_input or
         not folder_summary or
@@ -1483,17 +1601,29 @@ def _sync_ui(command_inputs):
 
     visible_bodies_mode = target_mode == 'visible_bodies'
     previous_target_mode = (last_target_mode_input.value or '').strip() or target_mode
+    if visible_bodies_mode and previous_target_mode != 'visible_bodies':
+        selected_cad = []
+        for format_key in CAD_FORMAT_KEYS:
+            checkbox = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(f'format_{format_key}'))
+            if checkbox and checkbox.value:
+                selected_cad.append(format_key)
+        cad_preferences_input.value = ','.join(selected_cad)
     if visible_bodies_mode:
-        if previous_target_mode != 'visible_bodies':
-            f3d_pref_input.value = bool(f3d_checkbox.value)
-        f3d_checkbox.value = False
-        f3d_checkbox.isEnabled = False
+        for format_key in CAD_FORMAT_KEYS:
+            checkbox = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(f'format_{format_key}'))
+            if checkbox:
+                checkbox.value = False
+                checkbox.isEnabled = False
     else:
-        f3d_checkbox.isEnabled = True
-        if previous_target_mode == 'visible_bodies':
-            f3d_checkbox.value = bool(f3d_pref_input.value)
+        restore_set = {key for key in (cad_preferences_input.value or '').split(',') if key in CAD_FORMAT_KEYS}
+        for format_key in CAD_FORMAT_KEYS:
+            checkbox = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(f'format_{format_key}'))
+            if checkbox:
+                checkbox.isEnabled = True
+                if previous_target_mode == 'visible_bodies':
+                    checkbox.value = format_key in restore_set
     format_note.isVisible = visible_bodies_mode
-    format_note.formattedText = 'F3D is unavailable in Export Only Visible Bodies mode because Fusion archive export works at the component level.'
+    format_note.formattedText = 'CAD / Solids formats are unavailable in Export Only Visible Bodies mode because those exports work at the component level.'
     last_target_mode_input.value = target_mode
 
     folder_input.isVisible = False
@@ -1688,17 +1818,16 @@ def _persist_current_preferences(inputs):
         _save_settings(settings)
 
 
-def _apply_options_from_settings(options, settings):
-    if not _supports_attr(options, 'meshRefinement'):
-        return
+def _apply_options_from_settings(format_key, options, settings):
+    is_mesh = format_key in MESH_FORMAT_KEYS
 
-    if _supports_attr(options, 'meshRefinement'):
+    if is_mesh and _supports_attr(options, 'meshRefinement'):
         if settings['mesh_refinement'] == 'custom':
             options.meshRefinement = _mesh_refinement_enum('custom')
         else:
             options.meshRefinement = _mesh_refinement_enum(settings['mesh_refinement'])
 
-    if settings['mesh_refinement'] == 'custom':
+    if is_mesh and settings['mesh_refinement'] == 'custom':
         if _supports_attr(options, 'surfaceDeviation'):
             options.surfaceDeviation = _parse_positive_float(settings['surface_deviation_cm'], 'Surface deviation')
         if _supports_attr(options, 'normalDeviation'):
@@ -1708,21 +1837,21 @@ def _apply_options_from_settings(options, settings):
         if _supports_attr(options, 'aspectRatio'):
             options.aspectRatio = _parse_positive_float(settings['aspect_ratio'], 'Aspect ratio')
 
-    if _supports_attr(options, 'unitType') and settings['unit_type'] != 'default':
+    if is_mesh and _supports_attr(options, 'unitType') and settings['unit_type'] != 'default':
         unit_enum = _distance_unit_enum(settings['unit_type'])
         if unit_enum is not None:
             options.unitType = unit_enum
 
-    if _supports_attr(options, 'isBinaryFormat'):
+    if format_key == 'stl' and _supports_attr(options, 'isBinaryFormat'):
         options.isBinaryFormat = bool(settings['binary_format'])
 
-    if _supports_attr(options, 'isOneFilePerBody'):
+    if is_mesh and _supports_attr(options, 'isOneFilePerBody'):
         options.isOneFilePerBody = bool(settings['one_file_per_body'])
 
-    if _supports_attr(options, 'sendToPrintUtility'):
+    if is_mesh and _supports_attr(options, 'sendToPrintUtility'):
         options.sendToPrintUtility = bool(settings['send_to_print_utility'])
 
-    if _supports_attr(options, 'printUtility') and settings['send_to_print_utility']:
+    if is_mesh and _supports_attr(options, 'printUtility') and settings['send_to_print_utility']:
         if settings['print_utility_mode'] == 'custom':
             if not settings['print_utility_value']:
                 raise ValueError('Enter a print utility path or switch the print utility mode away from custom.')
@@ -1756,10 +1885,10 @@ def _validate_inputs(command_inputs):
     for format_key in settings['formats']:
         format_geometry = _geometry_for_format(format_key, geometry)
         if not format_geometry or not _geometry_is_exportable(format_geometry, target_mode):
-            if format_key == 'f3d':
+            if format_key in CAD_FORMAT_KEYS:
                 if target_mode == 'full_design':
-                    return False, 'F3D export could not find exportable geometry in the active root design.'
-                return False, 'F3D export requires a component, occurrence, or body selection with actual model geometry, or an active root component with bodies.'
+                    return False, '{} export could not find exportable geometry in the active root design.'.format(FORMAT_LABELS[format_key])
+                return False, '{} export requires a component, occurrence, or body selection with actual model geometry, or an active root component with bodies.'.format(FORMAT_LABELS[format_key])
             return False, 'Nothing exportable was found for {} in the current selection or active design.'.format(FORMAT_LABELS[format_key])
 
         format_settings = _settings_for_format(settings, format_key)
@@ -1936,6 +2065,20 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             )
             target_hint_input = adsk.core.TextBoxCommandInput.cast(inputs.itemById('target_hint'))
             target_hint_input.isFullWidth = True
+            f3d_pref_input = inputs.addBoolValueInput(
+                'f3d_enabled_preference',
+                'Remember F3D Preference',
+                True,
+                '',
+                bool(settings.get('f3d_enabled_preference', 'f3d' in settings['formats']))
+            )
+            f3d_pref_input.isVisible = False
+            cad_preferences_input = inputs.addStringValueInput(
+                'cad_format_preferences',
+                'CAD Format Preferences',
+                ','.join([key for key in CAD_FORMAT_KEYS if key in settings['formats']])
+            )
+            cad_preferences_input.isVisible = False
             last_target_mode_input = inputs.addStringValueInput('last_target_mode', 'Last Target Mode', settings.get('target_mode', 'selection'))
             last_target_mode_input.isVisible = False
 
@@ -2024,27 +2167,30 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             )
             open_folder_input.tooltip = 'Open the export destination after a successful export.'
 
-            format_group = inputs.addGroupCommandInput('format_group', 'Formats')
-            format_inputs = format_group.children
+            mesh_group = inputs.addGroupCommandInput('mesh_format_group', 'Meshes')
+            mesh_group.isExpanded = bool(settings.get('mesh_group_expanded', True))
+            mesh_inputs = mesh_group.children
+            cad_group = inputs.addGroupCommandInput('cad_format_group', 'CAD / Solids')
+            cad_group.isExpanded = bool(settings.get('cad_group_expanded', False))
+            cad_inputs = cad_group.children
             selected_formats = settings['formats']
-            for key, label in FORMAT_LABELS.items():
-                format_inputs.addBoolValueInput(
+            for key in MESH_FORMAT_KEYS:
+                mesh_inputs.addBoolValueInput(
                     f'format_{key}',
-                    label,
+                    FORMAT_LABELS[key],
                     True,
                     '',
                     key in selected_formats
                 )
-                if key == 'f3d':
-                    f3d_pref_input = inputs.addBoolValueInput(
-                        'f3d_enabled_preference',
-                        'Remember F3D Preference',
-                        True,
-                        '',
-                        bool(settings.get('f3d_enabled_preference', 'f3d' in selected_formats))
-                    )
-                    f3d_pref_input.isVisible = False
-            format_note = format_inputs.addTextBoxCommandInput('format_note', '', '', 2, True)
+            for key in CAD_FORMAT_KEYS:
+                cad_inputs.addBoolValueInput(
+                    f'format_{key}',
+                    FORMAT_LABELS[key],
+                    True,
+                    '',
+                    key in selected_formats
+                )
+            format_note = cad_inputs.addTextBoxCommandInput('format_note', '', '', 2, True)
             format_note.isFullWidth = True
             format_note.isVisible = False
 
@@ -2055,7 +2201,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 '',
                 settings['settings_mode'] == 'per_format'
             )
-            customize_per_format_input.tooltip = 'Reveal separate STL, OBJ, 3MF, and F3D settings sections.'
+            customize_per_format_input.tooltip = 'Reveal separate settings sections for each selected export format.'
 
             settings_mode_input = inputs.addDropDownCommandInput('settings_mode', 'Settings Scope', adsk.core.DropDownStyles.TextListDropDownStyle)
             for key, label in SETTINGS_MODE_LABELS.items():
@@ -2173,11 +2319,17 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                     _ui.messageBox(message, COMMAND_NAME)
                     _refresh_update_ui(inputs, force_refresh=False, manual=False)
                 return
-            elif changed_input.id == 'format_f3d':
-                f3d_checkbox = adsk.core.BoolValueCommandInput.cast(changed_input)
-                f3d_pref_input = adsk.core.BoolValueCommandInput.cast(inputs.itemById('f3d_enabled_preference'))
-                if f3d_checkbox and f3d_pref_input:
-                    f3d_pref_input.value = bool(f3d_checkbox.value)
+            elif changed_input.id.startswith('format_'):
+                format_key = changed_input.id.replace('format_', '', 1)
+                if format_key in CAD_FORMAT_KEYS and _target_mode_from_inputs(inputs) != 'visible_bodies':
+                    cad_preferences_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('cad_format_preferences'))
+                    if cad_preferences_input:
+                        selected_cad = []
+                        for cad_key in CAD_FORMAT_KEYS:
+                            checkbox = adsk.core.BoolValueCommandInput.cast(inputs.itemById(f'format_{cad_key}'))
+                            if checkbox and checkbox.value:
+                                selected_cad.append(cad_key)
+                        cad_preferences_input.value = ','.join(selected_cad)
 
             if changed_input.id.endswith('filename'):
                 filename_input = adsk.core.StringValueCommandInput.cast(changed_input)
@@ -2279,10 +2431,12 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                         total_exports
                     )
 
-                options = _create_export_options(format_key, format_geometry, export_path)
-                _apply_options_from_settings(options, format_settings)
-
-                success = design.exportManager.execute(options)
+                if format_key == 'smt':
+                    success = _export_sat_or_smt_with_temporary_brep(format_key, format_geometry, export_path)
+                else:
+                    options = _create_export_options(format_key, format_geometry, export_path)
+                    _apply_options_from_settings(format_key, options, format_settings)
+                    success = design.exportManager.execute(options)
                 if not success:
                     raise RuntimeError('Fusion reported that the {} export did not complete.'.format(FORMAT_LABELS[format_key]))
 

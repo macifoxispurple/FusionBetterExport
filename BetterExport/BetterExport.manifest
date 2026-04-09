@@ -4,9 +4,9 @@
   "id": "9f2c4064-7b95-4df1-b918-fb98de5624b2",
   "author": "OpenAI Codex",
   "description": {
-    "": "Adds a persistent export command for STL, OBJ, 3MF, and F3D."
+    "": "Adds a persistent export command for mesh and CAD formats."
   },
-  "version": "1.6.2",
+  "version": "1.7.0",
   "runOnStartup": false,
   "supportedOS": "windows|mac",
   "editEnabled": true

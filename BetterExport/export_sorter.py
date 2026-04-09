@@ -8,6 +8,7 @@ VERSION_TOKEN_RE = re.compile(r" v[0-9]{1,5}(_?)")
 MTLLIB_RE = re.compile(r"^(\s*mtllib\s+)(.+?)(\r?\n?)$", re.IGNORECASE)
 
 MESH_EXTS = {".stl", ".3mf", ".obj", ".mtl"}
+CAD_EXTS = {".iges", ".igs", ".sat", ".smt", ".step", ".stp", ".usdz"}
 F3D_EXTS = {".f3d"}
 
 
@@ -34,14 +35,24 @@ def project_name(filename):
     return part or "Project"
 
 
-def mesh_dest_folder(ext):
+def export_dest_folder(ext):
     ext = ext.lower()
     if ext == ".stl":
-        return "STLs"
+        return "STL"
     if ext == ".3mf":
-        return "3MFs"
+        return "3MF"
     if ext in {".obj", ".mtl"}:
-        return "OBJs"
+        return "OBJ"
+    if ext in {".iges", ".igs"}:
+        return "IGES"
+    if ext == ".sat":
+        return "SAT"
+    if ext == ".smt":
+        return "SMT"
+    if ext in {".step", ".stp"}:
+        return "STEP"
+    if ext == ".usdz":
+        return "USDZ"
     raise ValueError(ext)
 
 
@@ -204,32 +215,32 @@ def scan_export_conflicts(input_dir, output_dir):
 
     conflicts = []
     files = _iter_top_level_files(input_dir)
-    mesh_files = [path for path in files if path.suffix.lower() in MESH_EXTS]
+    sortable_files = [path for path in files if path.suffix.lower() in MESH_EXTS.union(CAD_EXTS)]
     f3d_files = [path for path in files if path.suffix.lower() in F3D_EXTS]
 
-    best_mesh = {}
-    for path in mesh_files:
+    best_sortable = {}
+    for path in sortable_files:
         key = (normalize_keep_key(path.name), path.suffix.lower())
         version = extract_version(path.name)
-        current = best_mesh.get(key)
+        current = best_sortable.get(key)
         if current is None or version > current[0]:
-            best_mesh[key] = (version, path)
+            best_sortable[key] = (version, path)
 
-    keep_names = {path.name for _, path in best_mesh.values()}
-    planned_mesh = []
-    for path in mesh_files:
+    keep_names = {path.name for _, path in best_sortable.values()}
+    planned_sortable = []
+    for path in sortable_files:
         if path.name not in keep_names and has_version_token(path.name):
             continue
-        planned_mesh.append({
+        planned_sortable.append({
             "original_name": path.name,
             "final_name": normalize_final_name(path.name),
             "suffix": path.suffix
         })
 
-    for entry in planned_mesh:
+    for entry in planned_sortable:
         final_name = entry["final_name"]
         proj = project_name(normalize_final_name(final_name))
-        destination = output_dir / proj / mesh_dest_folder(entry["suffix"]) / final_name
+        destination = output_dir / proj / export_dest_folder(entry["suffix"]) / final_name
         if destination.exists():
             conflicts.append({
                 "operation": "move",
@@ -252,7 +263,7 @@ def scan_export_conflicts(input_dir, output_dir):
         proj = project_name(normalize_final_name(path.name))
         proj_dir = output_dir / proj
 
-        archive_target = proj_dir / "F3Ds" / path.name
+        archive_target = proj_dir / "F3D" / path.name
         if archive_target.exists():
             conflicts.append({
                 "operation": "move",
@@ -296,27 +307,27 @@ def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=
         return result
 
     files = _iter_top_level_files(input_dir)
-    mesh_files = [path for path in files if path.suffix.lower() in MESH_EXTS]
+    sortable_files = [path for path in files if path.suffix.lower() in MESH_EXTS.union(CAD_EXTS)]
     f3d_files = [path for path in files if path.suffix.lower() in F3D_EXTS]
 
-    best_mesh = {}
-    for path in mesh_files:
+    best_sortable = {}
+    for path in sortable_files:
         key = (normalize_keep_key(path.name), path.suffix.lower())
         version = extract_version(path.name)
-        current = best_mesh.get(key)
+        current = best_sortable.get(key)
         if current is None or version > current[0]:
-            best_mesh[key] = (version, path)
+            best_sortable[key] = (version, path)
 
-    keep_names = {path.name for _, path in best_mesh.values()}
-    for path in mesh_files:
+    keep_names = {path.name for _, path in best_sortable.values()}
+    for path in sortable_files:
         if path.name not in keep_names and has_version_token(path.name):
             result["deleted_mesh_duplicates"] += 1
             if not simulate_only and path.exists():
                 path.unlink()
 
-    mesh_files = [path for path in _iter_top_level_files(input_dir) if path.suffix.lower() in MESH_EXTS]
-    renamed_mesh_files = []
-    for path in sorted(mesh_files, key=lambda entry: entry.name.lower()):
+    sortable_files = [path for path in _iter_top_level_files(input_dir) if path.suffix.lower() in MESH_EXTS.union(CAD_EXTS)]
+    renamed_sortable_files = []
+    for path in sorted(sortable_files, key=lambda entry: entry.name.lower()):
         original_name = path.name
         new_name = normalize_final_name(path.name)
         target = path.with_name(new_name)
@@ -330,11 +341,11 @@ def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=
             result["conflicts_kept_both"] += 1
         elif rename_action == "skip":
             result["conflicts_skipped"] += 1
-        renamed_mesh_files.append((renamed_path, original_name))
+        renamed_sortable_files.append((renamed_path, original_name))
 
-    for path, original_name in renamed_mesh_files:
+    for path, original_name in renamed_sortable_files:
         proj = project_name(normalize_final_name(path.name))
-        destination = output_dir / proj / mesh_dest_folder(path.suffix) / path.name
+        destination = output_dir / proj / export_dest_folder(path.suffix) / path.name
         keep_both_destination = destination.with_name(original_name)
         moved, move_action, _ = _move_file(
             path,
@@ -367,7 +378,7 @@ def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=
     for path in f3d_files:
         proj = project_name(normalize_final_name(path.name))
         proj_dir = output_dir / proj
-        archive_target = proj_dir / "F3Ds" / path.name
+        archive_target = proj_dir / "F3D" / path.name
         moved, move_action, archived_path = _move_file(
             path,
             archive_target,
