@@ -17,7 +17,13 @@ ADDIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if ADDIN_DIR not in sys.path:
     sys.path.insert(0, ADDIN_DIR)
 
-from export_sorter import VERSION_TOKEN_RE, process_exports, scan_export_conflicts
+from export_sorter import (
+    VERSION_TOKEN_RE,
+    normalize_final_name,
+    process_exports,
+    project_name,
+    scan_export_conflicts,
+)
 from update_state import (
     STATE_APPLIED,
     STATE_FAILED,
@@ -120,6 +126,7 @@ GENERAL_DEFAULTS = {
     'auto_check_updates': True,
     'run_on_startup': True,
     'allow_overwrite': True,
+    'open_folder_after_export': True,
     'project_export_folders': {},
     'project_auto_sort_preferences': {},
     'update_check': {}
@@ -140,6 +147,19 @@ _app = None
 _ui = None
 _handlers = []
 _updated_runtime_module = None
+
+
+def _open_folder_in_system(path_value):
+    if not path_value:
+        return
+    normalized = os.path.normpath(path_value)
+    if sys.platform == 'darwin':
+        import subprocess
+        subprocess.Popen(['open', normalized])
+        return
+    if os.name == 'nt':
+        import subprocess
+        subprocess.Popen(['explorer', normalized])
 
 
 def _safe_call(fn):
@@ -409,6 +429,22 @@ def _sanitize_filename(name):
 
 def _format_extension(format_key):
     return '3mf' if format_key == '3mf' else format_key
+
+
+def _sorted_project_folder_for_settings(settings):
+    if not settings.get('auto_sort_after_export'):
+        return settings.get('folder', '')
+
+    for format_key in settings.get('formats', []):
+        format_settings = _settings_for_format(settings, format_key)
+        if format_settings.get('send_to_print_utility'):
+            continue
+        filename = _sanitize_filename(format_settings.get('filename') or _default_filename())
+        full_name = '{}.{}'.format(filename, _format_extension(format_key))
+        project_folder = project_name(normalize_final_name(full_name))
+        return os.path.join(settings.get('sorted_output_folder', ''), project_folder)
+
+    return settings.get('sorted_output_folder', '')
 
 
 def _current_addin_version():
@@ -839,6 +875,7 @@ def _read_general_settings(inputs):
     auto_check_updates = _read_bool_input(inputs, 'auto_check_updates')
     run_on_startup = _read_bool_input(inputs, 'run_on_startup')
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
+    open_folder_after_export = _read_bool_input(inputs, 'open_folder_after_export')
     customize_per_format = _read_bool_input(inputs, 'customize_per_format')
     f3d_enabled_preference = _read_bool_input(inputs, 'f3d_enabled_preference')
 
@@ -848,6 +885,7 @@ def _read_general_settings(inputs):
         auto_check_updates,
         run_on_startup,
         allow_overwrite,
+        open_folder_after_export,
         customize_per_format,
         f3d_enabled_preference
     ):
@@ -863,6 +901,7 @@ def _read_general_settings(inputs):
         'auto_check_updates': auto_check_updates,
         'run_on_startup': run_on_startup,
         'allow_overwrite': allow_overwrite,
+        'open_folder_after_export': open_folder_after_export,
         'settings_mode': 'per_format' if customize_per_format else 'global'
     }
 
@@ -1402,6 +1441,7 @@ def _sync_ui(command_inputs):
     sorted_output_summary = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('sorted_output_folder_summary'))
     browse_sorted_output_button = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('browse_sorted_output_folder'))
     overwrite_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('allow_overwrite'))
+    open_folder_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('open_folder_after_export'))
     customize_per_format_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('customize_per_format'))
 
     if (
@@ -1420,6 +1460,7 @@ def _sync_ui(command_inputs):
         not sorted_output_summary or
         not browse_sorted_output_button or
         not overwrite_input or
+        not open_folder_input or
         not customize_per_format_input
     ):
         return
@@ -1461,6 +1502,7 @@ def _sync_ui(command_inputs):
     folder_summary.tooltip = settings['folder']
     sorted_output_summary.formattedText = _short_path(settings['sorted_output_folder'])
     sorted_output_summary.tooltip = settings['sorted_output_folder']
+    open_folder_input.value = bool(settings.get('open_folder_after_export', True))
 
     settings_mode = settings['settings_mode']
     global_capabilities = _combined_capabilities(settings['formats'], geometry)
@@ -1957,6 +1999,14 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 '',
                 bool(settings['allow_overwrite'])
             )
+            open_folder_input = inputs.addBoolValueInput(
+                'open_folder_after_export',
+                'Open Folder After Export',
+                True,
+                '',
+                bool(settings.get('open_folder_after_export', True))
+            )
+            open_folder_input.tooltip = 'Open the export destination folder after a successful export.'
 
             format_group = inputs.addGroupCommandInput('format_group', 'Formats')
             format_inputs = format_group.children
@@ -2146,6 +2196,8 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
         progress_dialog = None
         export_succeeded = False
         export_cancelled = False
+        open_after_export = False
+        reveal_path = ''
         temp_staging_dir = None
         full_root_state = None
         design = None
@@ -2156,6 +2208,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 raise ValueError(message)
 
             settings = _current_settings_from_inputs(inputs)
+            open_after_export = bool(settings.get('open_folder_after_export', True))
             design = _active_design()
             target_mode = settings.get('target_mode', 'selection')
             geometry = _target_geometry(settings, inputs)
@@ -2250,6 +2303,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                     export_cancelled = True
 
             _save_settings(settings)
+            reveal_path = _sorted_project_folder_for_settings(settings) if settings['auto_sort_after_export'] else settings['folder']
             export_succeeded = True
         except Exception as exc:
             _show_error(str(exc))
@@ -2271,6 +2325,11 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                     pass
             if full_root_state:
                 _restore_full_root_state(design or _active_design(), full_root_state)
+            if export_succeeded and not export_cancelled and open_after_export:
+                try:
+                    _open_folder_in_system(reveal_path)
+                except Exception:
+                    pass
 
 
 class DestroyHandler(adsk.core.CommandEventHandler):

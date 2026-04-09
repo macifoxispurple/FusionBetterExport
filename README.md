@@ -24,6 +24,7 @@ This add-in is meant to make that process feel much less repetitive.
 - Keep per-project behavior where it matters, like normal export folders and whether a given file should auto-sort
 - Choose whether to export the full design, only currently visible bodies, or a specific selection
 - Support either one shared settings block or separate settings per format, depending on how much control you want
+- Optionally open the export destination folder automatically after a successful export
 - Fit into Fusion more naturally with a toolbar button, Browser context-menu entry, and visible export progress while the batch runs
 
 ## Export sorting
@@ -52,6 +53,8 @@ The sorting pass can:
 - organize outputs into per-project folders and type-specific subfolders
 
 There is also an `Allow Overwrite` option for cases where you want sorted outputs to replace existing files.
+
+If you want a faster handoff into the rest of your workflow, Better Export can also open the destination folder automatically after a successful export.
 
 One nice side effect of auto-sort is that it plays well with the `Reload from disk` feature in many 3D printer slicers. Because the add-in keeps writing cleaned files back to stable project folders, you can often refresh an existing model in the slicer in place instead of dragging a new copy in every time you export an updated version from Fusion.
 
