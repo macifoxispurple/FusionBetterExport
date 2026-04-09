@@ -35,7 +35,7 @@ SETTINGS_PATH = os.path.join(os.path.dirname(__file__), 'settings.json')
 MANIFEST_PATH = os.path.join(os.path.dirname(__file__), 'BetterExport.manifest')
 LATEST_RELEASE_API_URL = 'https://api.github.com/repos/macifoxispurple/FusionBetterExport/releases/latest'
 LATEST_RELEASE_PAGE_URL = 'https://github.com/macifoxispurple/FusionBetterExport/releases/latest'
-UPDATE_CACHE_MAX_AGE_SECONDS = 12 * 60 * 60
+UPDATE_CACHE_MAX_AGE_SECONDS = 5 * 60
 
 FORMAT_LABELS = {
     'stl': 'STL',

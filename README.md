@@ -127,7 +127,7 @@ If nothing is selected, the add-in exports the active root component.
 - Settings are stored locally in `BetterExport/settings.json`.
 - Most preferences save as soon as you change them, even if you close the dialog without exporting.
 - `File Name` is intentionally not persisted. It refreshes from the active Fusion document each time the dialog opens.
-- The add-in can check GitHub for newer releases. Automatic checks can be turned off, and if GitHub is unavailable the check fails quietly unless you ask for one manually.
+- The add-in can check GitHub for newer releases. Automatic checks can be turned off, cached results are only reused for a few minutes, and if GitHub is unavailable the check fails quietly unless you ask for one manually.
 - Fusion's API support varies a bit by version, so some options are shown only when your installed Fusion build exposes them.
 
 ## Project files
