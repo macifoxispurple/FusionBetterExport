@@ -2008,6 +2008,8 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 button.value = False
             elif changed_input.id == 'update_now':
                 button = adsk.core.BoolValueCommandInput.cast(changed_input)
+                if button:
+                    button.value = False
                 release_info = _latest_release_info(force_refresh=True, allow_cached_on_error=False)
                 latest_version = release_info.get('latest_version', '')
                 current_version = _current_addin_version()
@@ -2024,7 +2026,7 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                             ),
                             COMMAND_NAME
                         )
-                button.value = False
+                return
             elif changed_input.id == 'format_f3d':
                 f3d_checkbox = adsk.core.BoolValueCommandInput.cast(changed_input)
                 f3d_pref_input = adsk.core.BoolValueCommandInput.cast(inputs.itemById('f3d_enabled_preference'))
