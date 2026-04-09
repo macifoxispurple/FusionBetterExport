@@ -1100,9 +1100,6 @@ def _show_error(message):
 
 
 def _choose_sort_conflict_action(conflicts):
-    if not conflicts:
-        return "overwrite"
-
     preview_lines = []
     for conflict in conflicts[:3]:
         preview_lines.append(
@@ -1130,6 +1127,40 @@ def _choose_sort_conflict_action(conflicts):
     result = _ui.messageBox(
         message,
         'Overwrite conflicting files?',
+        adsk.core.MessageBoxButtonTypes.YesNoCancelButtonType,
+        adsk.core.MessageBoxIconTypes.WarningIconType
+    )
+    if result == adsk.core.DialogResults.DialogYes:
+        return "overwrite"
+    if result == adsk.core.DialogResults.DialogNo:
+        return "keep_both"
+    return "skip"
+
+
+def _choose_single_sort_conflict_action(source, target, operation, keep_both_target):
+    keep_both_name = keep_both_target.name if keep_both_target else source.name
+    message = (
+        'A sorted export file already exists at this location. Overwrite it?\n\n'
+        'Incoming file:\n{}\n\n'
+        'Existing file:\n{}\n\n'
+        'Location:\n{}\n\n'
+        'Choose an action:\n'
+        'Yes: Overwrite the existing file\n'
+        'No: Keep both files and save the new one as {}\n'
+        'Cancel: Keep the existing file and discard the new conflicting file'
+    ).format(
+        source.name,
+        target.name,
+        str(target),
+        keep_both_name
+    )
+
+    if not _ui:
+        return "skip"
+
+    result = _ui.messageBox(
+        message,
+        'Overwrite conflicting file?',
         adsk.core.MessageBoxButtonTypes.YesNoCancelButtonType,
         adsk.core.MessageBoxIconTypes.WarningIconType
     )
@@ -1592,14 +1623,19 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 if progress_dialog:
                     progress_dialog.message = 'Sorting exported files...'
                     adsk.doEvents()
-                conflict_action = "overwrite" if settings['allow_overwrite'] else _choose_sort_conflict_action(
-                    scan_export_conflicts(temp_staging_dir, settings['sorted_output_folder'])
-                )
+                conflict_resolver = None
+                if not settings['allow_overwrite']:
+                    scanned_conflicts = scan_export_conflicts(temp_staging_dir, settings['sorted_output_folder'])
+                    if scanned_conflicts:
+                        conflict_action = _choose_sort_conflict_action(scanned_conflicts)
+                        conflict_resolver = (lambda source, target, operation, keep_both_target, action=conflict_action: action)
+                    else:
+                        conflict_resolver = _choose_single_sort_conflict_action
                 process_exports(
                     temp_staging_dir,
                     settings['sorted_output_folder'],
                     allow_overwrite=settings['allow_overwrite'],
-                    conflict_resolver=(lambda source, target, operation, keep_both_target: conflict_action)
+                    conflict_resolver=conflict_resolver
                 )
 
             _save_settings(settings)
@@ -1727,16 +1763,6 @@ def stop(context):
                 control.deleteMe()
             if utilities_panel.controls.count == 0:
                 utilities_panel.deleteMe()
-
-        if not utilities_panel and not fallback_panel:
-            panel = _target_toolbar_panel(workspace)
-        else:
-            panel = None
-
-        if panel:
-            control = panel.controls.itemById(COMMAND_ID)
-            if control:
-                control.deleteMe()
 
         if _ui:
             marking_menu_event = _safe_call(lambda: _ui.markingMenuDisplaying)
