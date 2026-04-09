@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from BetterExport.export_sorter import process_exports
+from BetterExport.export_sorter import process_exports, scan_export_conflicts
 
 
 class ExportSorterTests(unittest.TestCase):
@@ -42,6 +42,74 @@ class ExportSorterTests(unittest.TestCase):
             "mtllib SwitchHeadboardHolder_SwitchHeadboardHolder_Screw_1_Body1.mtl",
             obj_text
         )
+
+    def test_conflict_overwrite_replaces_existing_destination(self):
+        (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
+
+        existing = self.output_dir / "DeskClip" / "STLs" / "DeskClip.stl"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text("old-stl", encoding="utf-8")
+
+        def resolver(source, target, operation, keep_both_target):
+            self.assertEqual(operation, "move")
+            return "overwrite"
+
+        result = process_exports(str(self.input_dir), str(self.output_dir), allow_overwrite=False, conflict_resolver=resolver)
+
+        self.assertEqual(result["conflicts_overwritten"], 1)
+        self.assertEqual(existing.read_text(encoding="utf-8"), "new-stl")
+
+    def test_conflict_keep_both_preserves_versioned_name(self):
+        (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
+
+        existing = self.output_dir / "DeskClip" / "STLs" / "DeskClip.stl"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text("old-stl", encoding="utf-8")
+
+        result = process_exports(
+            str(self.input_dir),
+            str(self.output_dir),
+            allow_overwrite=False,
+            conflict_resolver=lambda source, target, operation, keep_both_target: "keep_both"
+        )
+
+        kept_both = self.output_dir / "DeskClip" / "STLs" / "DeskClip v2.stl"
+        self.assertEqual(result["conflicts_kept_both"], 1)
+        self.assertTrue(existing.exists())
+        self.assertTrue(kept_both.exists())
+        self.assertEqual(kept_both.read_text(encoding="utf-8"), "new-stl")
+
+    def test_conflict_skip_leaves_existing_destination_untouched(self):
+        (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
+
+        existing = self.output_dir / "DeskClip" / "STLs" / "DeskClip.stl"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text("old-stl", encoding="utf-8")
+
+        result = process_exports(
+            str(self.input_dir),
+            str(self.output_dir),
+            allow_overwrite=False,
+            conflict_resolver=lambda source, target, operation, keep_both_target: "skip"
+        )
+
+        self.assertEqual(result["conflicts_skipped"], 1)
+        self.assertEqual(result["skipped_overwrite"], 1)
+        self.assertEqual(existing.read_text(encoding="utf-8"), "old-stl")
+        self.assertFalse((self.output_dir / "DeskClip" / "STLs" / "DeskClip v2.stl").exists())
+
+    def test_scan_export_conflicts_detects_existing_sorted_target(self):
+        (self.input_dir / "DeskClip v2.stl").write_text("new-stl", encoding="utf-8")
+
+        existing = self.output_dir / "DeskClip" / "STLs" / "DeskClip.stl"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text("old-stl", encoding="utf-8")
+
+        conflicts = scan_export_conflicts(str(self.input_dir), str(self.output_dir))
+
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["incoming_name"], "DeskClip.stl")
+        self.assertEqual(conflicts[0]["existing_name"], "DeskClip.stl")
 
 
 if __name__ == "__main__":

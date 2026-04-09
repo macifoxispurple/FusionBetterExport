@@ -49,6 +49,24 @@ def _iter_top_level_files(path):
     return [entry for entry in path.iterdir() if entry.is_file()]
 
 
+def _format_conflict_message(operation, source, target):
+    return f"Conflict during {operation}: incoming '{source.name}' would overwrite '{target.name}' at '{target}'."
+
+
+def _unique_conflict_target(target):
+    if not target.exists():
+        return target
+
+    stem = target.stem
+    suffix = target.suffix
+    counter = 2
+    while True:
+        candidate = target.with_name(f"{stem}_copy{counter}{suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
 def _replace_existing(target, allow_overwrite):
     if not target.exists():
         return True
@@ -61,41 +79,91 @@ def _replace_existing(target, allow_overwrite):
     return True
 
 
-def _move_file(source, target, simulate_only, allow_overwrite):
+def _resolve_conflict_target(source, target, operation, allow_overwrite, conflict_resolver, keep_both_target=None):
+    if not target.exists():
+        return target, "target"
+
+    if allow_overwrite:
+        return target, "overwrite"
+
+    if not conflict_resolver:
+        raise FileExistsError(_format_conflict_message(operation, source, target))
+
+    action = conflict_resolver(source, target, operation, keep_both_target or target)
+    if action == "overwrite":
+        return target, "overwrite"
+    if action == "keep_both":
+        candidate = keep_both_target or target
+        if candidate == source:
+            return source, "keep_both"
+        return _unique_conflict_target(candidate), "keep_both"
+    if action == "skip":
+        return target, "skip"
+
+    raise ValueError(f"Unsupported conflict action: {action}")
+
+
+def _move_file(source, target, simulate_only, allow_overwrite, conflict_resolver=None, keep_both_target=None):
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and not allow_overwrite:
-        return False
+    resolved_target, action = _resolve_conflict_target(
+        source,
+        target,
+        "move",
+        allow_overwrite,
+        conflict_resolver,
+        keep_both_target
+    )
+    if action == "skip":
+        return False, "skip", target
     if simulate_only:
-        return True
-    if not _replace_existing(target, allow_overwrite):
-        return False
-    shutil.move(str(source), str(target))
-    return True
+        return True, action, resolved_target
+    if action == "overwrite" and not _replace_existing(resolved_target, True):
+        return False, "skip", resolved_target
+    shutil.move(str(source), str(resolved_target))
+    return True, action, resolved_target
 
 
-def _copy_file(source, target, simulate_only, allow_overwrite):
+def _copy_file(source, target, simulate_only, allow_overwrite, conflict_resolver=None, keep_both_target=None):
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and not allow_overwrite:
-        return False
+    resolved_target, action = _resolve_conflict_target(
+        source,
+        target,
+        "copy",
+        allow_overwrite,
+        conflict_resolver,
+        keep_both_target
+    )
+    if action == "skip":
+        return False, "skip", target
     if simulate_only:
-        return True
-    if not _replace_existing(target, allow_overwrite):
-        return False
-    shutil.copy2(str(source), str(target))
-    return True
+        return True, action, resolved_target
+    if action == "overwrite" and not _replace_existing(resolved_target, True):
+        return False, "skip", resolved_target
+    shutil.copy2(str(source), str(resolved_target))
+    return True, action, resolved_target
 
 
-def _rename_file(source, target, simulate_only, allow_overwrite):
+def _rename_file(source, target, simulate_only, allow_overwrite, conflict_resolver=None):
     if source == target:
-        return source
-    if target.exists() and not allow_overwrite:
-        return source
+        return source, "unchanged"
+    resolved_target, action = _resolve_conflict_target(
+        source,
+        target,
+        "rename",
+        allow_overwrite,
+        conflict_resolver,
+        source
+    )
+    if action == "skip":
+        return source, "skip"
+    if resolved_target == source:
+        return source, "keep_both"
     if simulate_only:
-        return target
-    if not _replace_existing(target, allow_overwrite):
-        return source
-    source.rename(target)
-    return target
+        return resolved_target, action
+    if action == "overwrite" and not _replace_existing(resolved_target, True):
+        return source, "skip"
+    source.rename(resolved_target)
+    return resolved_target, action
 
 
 def _rewrite_obj_mtllib_reference(path, simulate_only):
@@ -127,7 +195,88 @@ def _rewrite_obj_mtllib_reference(path, simulate_only):
     return True
 
 
-def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=True):
+def scan_export_conflicts(input_dir, output_dir):
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+
+    if not input_dir.exists() or not input_dir.is_dir():
+        return []
+
+    conflicts = []
+    files = _iter_top_level_files(input_dir)
+    mesh_files = [path for path in files if path.suffix.lower() in MESH_EXTS]
+    f3d_files = [path for path in files if path.suffix.lower() in F3D_EXTS]
+
+    best_mesh = {}
+    for path in mesh_files:
+        key = (normalize_keep_key(path.name), path.suffix.lower())
+        version = extract_version(path.name)
+        current = best_mesh.get(key)
+        if current is None or version > current[0]:
+            best_mesh[key] = (version, path)
+
+    keep_names = {path.name for _, path in best_mesh.values()}
+    planned_mesh = []
+    for path in mesh_files:
+        if path.name not in keep_names and has_version_token(path.name):
+            continue
+        planned_mesh.append({
+            "original_name": path.name,
+            "final_name": normalize_final_name(path.name),
+            "suffix": path.suffix
+        })
+
+    for entry in planned_mesh:
+        final_name = entry["final_name"]
+        proj = project_name(normalize_final_name(final_name))
+        destination = output_dir / proj / mesh_dest_folder(entry["suffix"]) / final_name
+        if destination.exists():
+            conflicts.append({
+                "operation": "move",
+                "incoming_name": final_name,
+                "existing_name": destination.name,
+                "target_path": str(destination),
+                "keep_both_name": entry["original_name"]
+            })
+
+    best_f3d = {}
+    for path in f3d_files:
+        cleaned_name = normalize_final_name(path.name)
+        version = extract_version(path.name)
+        current = best_f3d.get(cleaned_name)
+        if current is None or version > current[0]:
+            best_f3d[cleaned_name] = (version, path.name)
+
+    best_clean_names = {name for _, name in best_f3d.values()}
+    for path in f3d_files:
+        proj = project_name(normalize_final_name(path.name))
+        proj_dir = output_dir / proj
+
+        archive_target = proj_dir / "F3Ds" / path.name
+        if archive_target.exists():
+            conflicts.append({
+                "operation": "move",
+                "incoming_name": path.name,
+                "existing_name": archive_target.name,
+                "target_path": str(archive_target),
+                "keep_both_name": path.name
+            })
+
+        if path.name in best_clean_names:
+            clean_target = proj_dir / normalize_final_name(path.name)
+            if clean_target.exists():
+                conflicts.append({
+                    "operation": "copy",
+                    "incoming_name": normalize_final_name(path.name),
+                    "existing_name": clean_target.name,
+                    "target_path": str(clean_target),
+                    "keep_both_name": path.name
+                })
+
+    return conflicts
+
+
+def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=True, conflict_resolver=None):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
 
@@ -137,7 +286,10 @@ def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=
         "moved_mesh_files": 0,
         "archived_f3d_files": 0,
         "copied_f3d_files": 0,
-        "skipped_overwrite": 0
+        "skipped_overwrite": 0,
+        "conflicts_overwritten": 0,
+        "conflicts_kept_both": 0,
+        "conflicts_skipped": 0
     }
 
     if not input_dir.exists() or not input_dir.is_dir():
@@ -165,22 +317,43 @@ def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=
     mesh_files = [path for path in _iter_top_level_files(input_dir) if path.suffix.lower() in MESH_EXTS]
     renamed_mesh_files = []
     for path in sorted(mesh_files, key=lambda entry: entry.name.lower()):
+        original_name = path.name
         new_name = normalize_final_name(path.name)
         target = path.with_name(new_name)
-        renamed_path = _rename_file(path, target, simulate_only, allow_overwrite)
+        renamed_path, rename_action = _rename_file(path, target, simulate_only, allow_overwrite, conflict_resolver)
         _rewrite_obj_mtllib_reference(renamed_path, simulate_only)
         if renamed_path.name != path.name:
             result["renamed_mesh_files"] += 1
-        renamed_mesh_files.append(renamed_path)
+        if rename_action == "overwrite":
+            result["conflicts_overwritten"] += 1
+        elif rename_action == "keep_both":
+            result["conflicts_kept_both"] += 1
+        elif rename_action == "skip":
+            result["conflicts_skipped"] += 1
+        renamed_mesh_files.append((renamed_path, original_name))
 
-    for path in renamed_mesh_files:
-        proj = project_name(path.name)
+    for path, original_name in renamed_mesh_files:
+        proj = project_name(normalize_final_name(path.name))
         destination = output_dir / proj / mesh_dest_folder(path.suffix) / path.name
-        moved = _move_file(path, destination, simulate_only, allow_overwrite)
+        keep_both_destination = destination.with_name(original_name)
+        moved, move_action, _ = _move_file(
+            path,
+            destination,
+            simulate_only,
+            allow_overwrite,
+            conflict_resolver,
+            keep_both_destination
+        )
         if moved:
             result["moved_mesh_files"] += 1
+            if move_action == "overwrite":
+                result["conflicts_overwritten"] += 1
+            elif move_action == "keep_both":
+                result["conflicts_kept_both"] += 1
         else:
             result["skipped_overwrite"] += 1
+            if move_action == "skip":
+                result["conflicts_skipped"] += 1
 
     best_f3d = {}
     for path in f3d_files:
@@ -195,19 +368,46 @@ def process_exports(input_dir, output_dir, simulate_only=False, allow_overwrite=
         proj = project_name(normalize_final_name(path.name))
         proj_dir = output_dir / proj
         archive_target = proj_dir / "F3Ds" / path.name
-        moved = _move_file(path, archive_target, simulate_only, allow_overwrite)
+        moved, move_action, archived_path = _move_file(
+            path,
+            archive_target,
+            simulate_only,
+            allow_overwrite,
+            conflict_resolver,
+            archive_target.with_name(path.name)
+        )
         if moved:
             result["archived_f3d_files"] += 1
+            if move_action == "overwrite":
+                result["conflicts_overwritten"] += 1
+            elif move_action == "keep_both":
+                result["conflicts_kept_both"] += 1
         else:
             result["skipped_overwrite"] += 1
+            if move_action == "skip":
+                result["conflicts_skipped"] += 1
             continue
 
         if path.name in best_clean_names:
             clean_target = proj_dir / normalize_final_name(path.name)
-            copied = _copy_file(archive_target, clean_target, simulate_only, allow_overwrite)
+            keep_both_clean_target = proj_dir / archived_path.name
+            copied, copy_action, _ = _copy_file(
+                archived_path,
+                clean_target,
+                simulate_only,
+                allow_overwrite,
+                conflict_resolver,
+                keep_both_clean_target
+            )
             if copied:
                 result["copied_f3d_files"] += 1
+                if copy_action == "overwrite":
+                    result["conflicts_overwritten"] += 1
+                elif copy_action == "keep_both":
+                    result["conflicts_kept_both"] += 1
             else:
                 result["skipped_overwrite"] += 1
+                if copy_action == "skip":
+                    result["conflicts_skipped"] += 1
 
     return result

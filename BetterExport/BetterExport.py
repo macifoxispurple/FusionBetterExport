@@ -15,7 +15,7 @@ ADDIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if ADDIN_DIR not in sys.path:
     sys.path.insert(0, ADDIN_DIR)
 
-from export_sorter import VERSION_TOKEN_RE, process_exports
+from export_sorter import VERSION_TOKEN_RE, process_exports, scan_export_conflicts
 
 
 COMMAND_ID = 'betterMeshExportCommand'
@@ -586,6 +586,46 @@ def _geometry_for_format(format_key, geometry):
     return None
 
 
+def _component_has_bodies(component, visited=None):
+    component = adsk.fusion.Component.cast(component)
+    if not component:
+        return False
+
+    visited = visited or set()
+    token = _safe_call(lambda: component.entityToken) or str(id(component))
+    if token in visited:
+        return False
+    visited.add(token)
+
+    body_count = _safe_call(lambda: component.bRepBodies.count) or 0
+    if body_count > 0:
+        return True
+
+    occurrence_count = _safe_call(lambda: component.occurrences.count) or 0
+    for index in range(occurrence_count):
+        occurrence = _safe_call(lambda i=index: component.occurrences.item(i))
+        child_component = _safe_call(lambda occ=occurrence: occ.component)
+        if child_component and _component_has_bodies(child_component, visited):
+            return True
+
+    return False
+
+
+def _geometry_is_exportable(entity):
+    if adsk.fusion.BRepBody.cast(entity):
+        return True
+
+    occurrence = adsk.fusion.Occurrence.cast(entity)
+    if occurrence:
+        return _component_has_bodies(occurrence.component)
+
+    component = adsk.fusion.Component.cast(entity)
+    if component:
+        return _component_has_bodies(component)
+
+    return False
+
+
 def _mesh_refinement_enum(setting_key):
     enum_type = getattr(adsk.fusion, 'MeshRefinementSettings', None)
     if enum_type:
@@ -943,6 +983,47 @@ def _show_error(message):
         _ui.messageBox(message, COMMAND_NAME)
 
 
+def _choose_sort_conflict_action(conflicts):
+    if not conflicts:
+        return "overwrite"
+
+    preview_lines = []
+    for conflict in conflicts[:3]:
+        preview_lines.append(
+            "Incoming: {}\nExisting: {}\nLocation: {}".format(
+                conflict["incoming_name"],
+                conflict["existing_name"],
+                conflict["target_path"]
+            )
+        )
+
+    extra_count = max(0, len(conflicts) - len(preview_lines))
+    extra_text = "\n\nAnd {} more conflict(s).".format(extra_count) if extra_count else ""
+    message = (
+        '{} sorted export conflict(s) were found.\n\n'
+        '{}{}'
+        '\n\nChoose an action for all conflicts:\n'
+        'Yes: Overwrite existing files\n'
+        'No: Keep both files and save the new one with a unique name if needed\n'
+        'Cancel: Discard newly exported conflicting files and continue'
+    ).format(len(conflicts), "\n\n".join(preview_lines), extra_text)
+
+    if not _ui:
+        return "skip"
+
+    result = _ui.messageBox(
+        message,
+        'Overwrite conflicting files?',
+        adsk.core.MessageBoxButtonTypes.YesNoCancelButtonType,
+        adsk.core.MessageBoxIconTypes.WarningIconType
+    )
+    if result == adsk.core.DialogResults.DialogYes:
+        return "overwrite"
+    if result == adsk.core.DialogResults.DialogNo:
+        return "keep_both"
+    return "skip"
+
+
 def _persist_current_preferences(inputs):
     settings = _current_settings_from_inputs(inputs)
     if settings:
@@ -1000,6 +1081,8 @@ def _validate_inputs(command_inputs):
     geometry = _selected_geometry(command_inputs)
     if not geometry:
         return False, 'Select a body, component, or occurrence, or keep a design active to export the root component.'
+    if not _geometry_is_exportable(geometry):
+        return False, 'Nothing exportable was found in the current selection or active design.'
 
     settings = _current_settings_from_inputs(command_inputs)
 
@@ -1008,8 +1091,10 @@ def _validate_inputs(command_inputs):
 
     for format_key in settings['formats']:
         format_geometry = _geometry_for_format(format_key, geometry)
-        if format_key == 'f3d' and not format_geometry:
-            return False, 'F3D export requires a component, occurrence, or body selection, or an active root component.'
+        if not format_geometry or not _geometry_is_exportable(format_geometry):
+            if format_key == 'f3d':
+                return False, 'F3D export requires a component, occurrence, or body selection with actual model geometry, or an active root component with bodies.'
+            return False, 'Nothing exportable was found for {} in the current selection or active design.'.format(FORMAT_LABELS[format_key])
 
         format_settings = _settings_for_format(settings, format_key)
 
@@ -1306,7 +1391,6 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
         progress_dialog = None
         export_succeeded = False
         temp_staging_dir = None
-        sort_failure_staging_dir = None
         try:
             inputs = args.command.commandInputs
             valid, message = _validate_inputs(inputs)
@@ -1378,21 +1462,20 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 if progress_dialog:
                     progress_dialog.message = 'Sorting exported files...'
                     adsk.doEvents()
+                conflict_action = "overwrite" if settings['allow_overwrite'] else _choose_sort_conflict_action(
+                    scan_export_conflicts(temp_staging_dir, settings['sorted_output_folder'])
+                )
                 process_exports(
                     temp_staging_dir,
                     settings['sorted_output_folder'],
-                    allow_overwrite=settings['allow_overwrite']
+                    allow_overwrite=settings['allow_overwrite'],
+                    conflict_resolver=(lambda source, target, operation, keep_both_target: conflict_action)
                 )
 
             _save_settings(settings)
             export_succeeded = True
         except Exception as exc:
-            if temp_staging_dir and os.path.isdir(temp_staging_dir):
-                sort_failure_staging_dir = temp_staging_dir
-            error_message = str(exc)
-            if sort_failure_staging_dir:
-                error_message = '{}\n\nTemporary staging folder retained at:\n{}'.format(error_message, sort_failure_staging_dir)
-            _show_error(error_message)
+            _show_error(str(exc))
         finally:
             if progress_dialog:
                 try:
@@ -1404,7 +1487,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                     progress_dialog.hide()
                 except Exception:
                     pass
-            if export_succeeded and temp_staging_dir and os.path.isdir(temp_staging_dir):
+            if temp_staging_dir and os.path.isdir(temp_staging_dir):
                 try:
                     shutil.rmtree(temp_staging_dir)
                 except Exception:
