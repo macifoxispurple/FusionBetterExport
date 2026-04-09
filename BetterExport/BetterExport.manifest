@@ -6,7 +6,7 @@
   "description": {
     "": "Adds a persistent export command for STL, OBJ, 3MF, and F3D."
   },
-  "version": "1.4.3",
+  "version": "1.4.4",
   "runOnStartup": false,
   "supportedOS": "windows|mac",
   "editEnabled": true
