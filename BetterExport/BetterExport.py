@@ -124,7 +124,7 @@ UNIT_KEYS_BY_LABEL = {label: key for key, label in UNIT_LABELS.items()}
 _app = None
 _ui = None
 _handlers = []
-_stop_addin_after_command_close = False
+_updated_runtime_module = None
 
 
 def _safe_call(fn):
@@ -501,6 +501,17 @@ def _latest_release_info(force_refresh=False, allow_cached_on_error=True):
         }
 
 
+def _pending_update_version():
+    if not os.path.exists(PENDING_UPDATE_INFO_PATH):
+        return ''
+    try:
+        with open(PENDING_UPDATE_INFO_PATH, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+        return str(payload.get('latest_version') or '').strip()
+    except Exception:
+        return ''
+
+
 def _download_release_asset(asset_url, destination_path):
     request = urllib.request.Request(
         asset_url,
@@ -638,14 +649,18 @@ def _apply_pending_update_if_needed():
 
 
 def _launch_updated_addin_from_disk(context):
+    global _updated_runtime_module
     updated_entry_path = os.path.join(ADDIN_DIR, 'BetterExport.py')
-    spec = importlib.util.spec_from_file_location('better_export_updated_main', updated_entry_path)
+    module_name = 'better_export_updated_main'
+    spec = importlib.util.spec_from_file_location(module_name, updated_entry_path)
     if not spec or not spec.loader:
         raise RuntimeError('Could not load the updated Better Export entry point.')
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     if not hasattr(module, 'run'):
         raise RuntimeError('The updated Better Export entry point did not define run(context).')
+    _updated_runtime_module = module
     module.run(context)
 
 
@@ -1401,7 +1416,15 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
         return
 
     current_version = _current_addin_version()
+    pending_version = _pending_update_version()
     auto_check_enabled = bool(auto_check_input.value)
+
+    if pending_version:
+        status_input.isVisible = True
+        status_input.formattedText = 'Version v{} - Restart pending for v{}'.format(current_version, pending_version)
+        status_input.tooltip = ''
+        update_now_input.isVisible = False
+        return
 
     if not auto_check_enabled and not manual:
         status_input.isVisible = True
@@ -1913,7 +1936,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
     def notify(self, args):
         try:
-            global _stop_addin_after_command_close
             changed_input = args.input
             inputs = args.inputs
 
@@ -1948,20 +1970,16 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 else:
                     _set_run_on_startup(True)
                     _stage_update_payload(release_info)
-                    _stop_addin_after_command_close = True
                     _ui.messageBox(
                         'Better Export v{} has been downloaded and staged.\n\n'
                         'Run on Startup has been enabled for Better Export so Fusion can finish the update on next launch.\n\n'
-                        'Please restart Fusion completely after clicking OK.\n\n'
-                        'Better Export will now close.'.format(
+                        'You can finish your exports in the current session.\n\n'
+                        'Restart Fusion when convenient to apply the update.'.format(
                             latest_version
                         ),
                         COMMAND_NAME
                     )
-                    try:
-                        _ui.terminateActiveCommand()
-                    except Exception:
-                        pass
+                    _refresh_update_ui(inputs, force_refresh=False, manual=False)
                 return
             elif changed_input.id == 'format_f3d':
                 f3d_checkbox = adsk.core.BoolValueCommandInput.cast(changed_input)
@@ -2131,16 +2149,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
 
 class DestroyHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
-        global _stop_addin_after_command_close
-        if not _stop_addin_after_command_close:
-            return
-        _stop_addin_after_command_close = False
-        try:
-            script_item = _script_item_for_addin()
-            if script_item and bool(_safe_call(lambda: script_item.isRunning)):
-                script_item.stop()
-        except Exception:
-            pass
+        pass
 
 
 class MarkingMenuHandler(adsk.core.MarkingMenuEventHandler):
