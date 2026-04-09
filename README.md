@@ -53,8 +53,6 @@ The sorting pass can:
 
 There is also an `Allow Overwrite` option for cases where you want sorted outputs to replace existing files.
 
-The temporary staging folder is cleaned up automatically after the export attempt finishes, so the auto-sort workflow does not leave extra staging artifacts behind on disk.
-
 One nice side effect of auto-sort is that it plays well with the `Reload from disk` feature in many 3D printer slicers. Because the add-in keeps writing cleaned files back to stable project folders, you can often refresh an existing model in the slicer in place instead of dragging a new copy in every time you export an updated version from Fusion.
 
 ## Example sorted output
