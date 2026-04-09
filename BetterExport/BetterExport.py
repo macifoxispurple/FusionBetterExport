@@ -65,6 +65,17 @@ SETTINGS_MODE_LABELS = {
     'per_format': 'Per Format'
 }
 
+TARGET_MODE_LABELS = {
+    'full_design': 'Export Full Design',
+    'visible_bodies': 'Export Only Visible Bodies',
+    'selection': 'Export Selection'
+}
+
+DESTINATION_MODE_LABELS = {
+    'direct': 'Direct Export',
+    'sorted': 'Sort Into Project Folders'
+}
+
 OPTION_DEFAULTS = {
     'filename': '',
     'mesh_refinement': 'medium',
@@ -85,6 +96,8 @@ GENERAL_DEFAULTS = {
     'sorted_output_folder': os.path.expanduser('~'),
     'auto_sort_after_export': False,
     'always_export_full_root': False,
+    'target_mode': 'selection',
+    'f3d_enabled_preference': False,
     'auto_check_updates': True,
     'allow_overwrite': True,
     'project_export_folders': {},
@@ -171,7 +184,16 @@ def _supports_export_selection(entity):
 def _merge_settings(values):
     merged = dict(DEFAULT_SETTINGS)
     merged.update(values or {})
+    legacy_full_root = bool(merged.get('always_export_full_root'))
+    merged['target_mode'] = merged.get('target_mode')
+    if merged['target_mode'] not in TARGET_MODE_LABELS:
+        merged['target_mode'] = 'full_design' if legacy_full_root else 'selection'
+    merged['always_export_full_root'] = merged['target_mode'] == 'full_design'
     merged['formats'] = _normalized_formats(merged.get('formats'), merged.get('format'))
+    if isinstance(values, dict) and 'f3d_enabled_preference' in values:
+        merged['f3d_enabled_preference'] = bool(values.get('f3d_enabled_preference'))
+    else:
+        merged['f3d_enabled_preference'] = 'f3d' in merged['formats']
     merged['settings_mode'] = merged['settings_mode'] if merged.get('settings_mode') in SETTINGS_MODE_LABELS else 'global'
     merged['per_format_settings'] = _normalized_per_format_settings(merged.get('per_format_settings'))
     merged['project_export_folders'] = _normalized_project_export_folders(merged.get('project_export_folders'))
@@ -393,6 +415,12 @@ def _save_update_check(update_check):
         json.dump(_merge_settings(settings), handle, indent=2, sort_keys=True)
 
 
+def _upgrade_settings_file():
+    settings = _load_settings()
+    _save_settings(settings)
+    return _load_settings()
+
+
 def _fetch_latest_release_info():
     request = urllib.request.Request(
         LATEST_RELEASE_API_URL,
@@ -468,6 +496,15 @@ def _selected_formats_from_inputs(inputs):
     return selected
 
 
+def _set_format_enabled(inputs, format_key, enabled):
+    checkbox = adsk.core.BoolValueCommandInput.cast(inputs.itemById(f'format_{format_key}'))
+    if not checkbox:
+        return
+    checkbox.isEnabled = enabled
+    if not enabled:
+        checkbox.value = False
+
+
 def _option_prefix(scope_key):
     return f'{scope_key}_'
 
@@ -502,6 +539,24 @@ def _settings_mode_from_inputs(inputs):
     return 'global'
 
 
+def _target_mode_from_inputs(inputs):
+    raw_value = _dropdown_value(inputs, 'target_mode')
+    for key, label in TARGET_MODE_LABELS.items():
+        if raw_value == label:
+            return key
+    full_root_enabled = _read_bool_input(inputs, 'always_export_full_root')
+    return 'full_design' if full_root_enabled else 'selection'
+
+
+def _destination_mode_from_inputs(inputs):
+    raw_value = _dropdown_value(inputs, 'destination_mode')
+    for key, label in DESTINATION_MODE_LABELS.items():
+        if raw_value == label:
+            return key
+    auto_sort_enabled = _read_bool_input(inputs, 'auto_sort_after_export')
+    return 'sorted' if auto_sort_enabled else 'direct'
+
+
 def _read_option_values(inputs, scope_key):
     result = {}
     for field_name, default_value in OPTION_DEFAULTS.items():
@@ -522,18 +577,22 @@ def _read_option_values(inputs, scope_key):
 def _read_general_settings(inputs):
     folder = _read_string_input(inputs, 'folder')
     sorted_output_folder = _read_string_input(inputs, 'sorted_output_folder')
-    auto_sort_after_export = _read_bool_input(inputs, 'auto_sort_after_export')
-    always_export_full_root = _read_bool_input(inputs, 'always_export_full_root')
+    target_mode = _target_mode_from_inputs(inputs)
+    destination_mode = _destination_mode_from_inputs(inputs)
+    auto_sort_after_export = destination_mode == 'sorted'
+    always_export_full_root = target_mode == 'full_design'
     auto_check_updates = _read_bool_input(inputs, 'auto_check_updates')
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
+    customize_per_format = _read_bool_input(inputs, 'customize_per_format')
+    f3d_enabled_preference = _read_bool_input(inputs, 'f3d_enabled_preference')
 
     if None in (
         folder,
         sorted_output_folder,
-        auto_sort_after_export,
-        always_export_full_root,
         auto_check_updates,
-        allow_overwrite
+        allow_overwrite,
+        customize_per_format,
+        f3d_enabled_preference
     ):
         return None
 
@@ -542,8 +601,11 @@ def _read_general_settings(inputs):
         'sorted_output_folder': sorted_output_folder,
         'auto_sort_after_export': auto_sort_after_export,
         'always_export_full_root': always_export_full_root,
+        'target_mode': target_mode,
+        'f3d_enabled_preference': f3d_enabled_preference,
         'auto_check_updates': auto_check_updates,
-        'allow_overwrite': allow_overwrite
+        'allow_overwrite': allow_overwrite,
+        'settings_mode': 'per_format' if customize_per_format else 'global'
     }
 
 
@@ -561,10 +623,20 @@ def _primary_format(settings):
     return formats[0]
 
 
-def _selected_geometry(inputs):
+def _selected_entity(inputs):
     selection_input = adsk.core.SelectionCommandInput.cast(inputs.itemById('geometry'))
     if selection_input and selection_input.selectionCount > 0:
         return selection_input.selection(0).entity
+    return None
+
+
+def _selected_geometry(inputs):
+    return _selected_entity(inputs) or _root_component()
+
+
+def _target_geometry(settings, inputs):
+    if settings.get('target_mode') == 'selection':
+        return _selected_entity(inputs)
     return _root_component()
 
 
@@ -615,16 +687,49 @@ def _component_has_bodies(component, visited=None):
     return False
 
 
-def _geometry_is_exportable(entity):
+def _component_has_visible_bodies(component, visited=None):
+    component = adsk.fusion.Component.cast(component)
+    if not component:
+        return False
+
+    visited = visited or set()
+    token = _safe_call(lambda: component.entityToken) or str(id(component))
+    if token in visited:
+        return False
+    visited.add(token)
+
+    body_count = _safe_call(lambda: component.bRepBodies.count) or 0
+    for index in range(body_count):
+        body = _safe_call(lambda i=index: component.bRepBodies.item(i))
+        if body and bool(_safe_call(lambda b=body: b.isLightBulbOn)):
+            return True
+
+    occurrence_count = _safe_call(lambda: component.occurrences.count) or 0
+    for index in range(occurrence_count):
+        occurrence = _safe_call(lambda i=index: component.occurrences.item(i))
+        if not occurrence or not bool(_safe_call(lambda occ=occurrence: occ.isLightBulbOn)):
+            continue
+        child_component = _safe_call(lambda occ=occurrence: occ.component)
+        if child_component and _component_has_visible_bodies(child_component, visited):
+            return True
+
+    return False
+
+
+def _geometry_is_exportable(entity, target_mode='selection'):
     if adsk.fusion.BRepBody.cast(entity):
         return True
 
     occurrence = adsk.fusion.Occurrence.cast(entity)
     if occurrence:
+        if target_mode == 'visible_bodies':
+            return _component_has_visible_bodies(occurrence.component)
         return _component_has_bodies(occurrence.component)
 
     component = adsk.fusion.Component.cast(entity)
     if component:
+        if target_mode == 'visible_bodies':
+            return _component_has_visible_bodies(component)
         return _component_has_bodies(component)
 
     return False
@@ -738,6 +843,22 @@ def _prepare_full_root_export(design):
             body.isLightBulbOn = True
         except Exception:
             pass
+
+    return saved_state
+
+
+def _prepare_visible_bodies_export(design):
+    root_component = _root_component()
+    if not design or not root_component:
+        return None
+
+    saved_state = _collect_full_root_state(root_component)
+    saved_state['active_occurrence'] = _safe_call(lambda: design.activeOccurrence)
+
+    try:
+        design.activateRootComponent()
+    except Exception:
+        pass
 
     return saved_state
 
@@ -933,7 +1054,7 @@ def _current_settings_from_inputs(inputs):
         **general_settings,
         **global_values,
         'formats': _selected_formats_from_inputs(inputs),
-        'settings_mode': _settings_mode_from_inputs(inputs),
+        'settings_mode': general_settings['settings_mode'],
         'per_format_settings': per_format_settings
     }
 
@@ -1004,10 +1125,18 @@ def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities
 
 def _sync_ui(command_inputs):
     settings = _merge_settings(_current_settings_from_inputs(command_inputs))
-    geometry = _selected_geometry(command_inputs)
+    geometry = _target_geometry(settings, command_inputs) or _root_component()
     if not geometry:
         return
 
+    target_mode_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('target_mode'))
+    target_input = adsk.core.SelectionCommandInput.cast(command_inputs.itemById('geometry'))
+    target_hint = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('target_hint'))
+    destination_mode_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('destination_mode'))
+    format_note = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('format_note'))
+    f3d_pref_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('f3d_enabled_preference'))
+    f3d_checkbox = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('format_f3d'))
+    last_target_mode_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('last_target_mode'))
     folder_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('folder'))
     folder_summary = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('folder_summary'))
     browse_folder_button = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('browse_folder'))
@@ -1015,17 +1144,51 @@ def _sync_ui(command_inputs):
     sorted_output_summary = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('sorted_output_folder_summary'))
     browse_sorted_output_button = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('browse_sorted_output_folder'))
     overwrite_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('allow_overwrite'))
+    customize_per_format_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('customize_per_format'))
 
     if (
+        not target_mode_input or
+        not target_input or
+        not target_hint or
+        not destination_mode_input or
+        not format_note or
+        not f3d_pref_input or
+        not f3d_checkbox or
+        not last_target_mode_input or
         not folder_input or
         not folder_summary or
         not browse_folder_button or
         not sorted_output_input or
         not sorted_output_summary or
         not browse_sorted_output_button or
-        not overwrite_input
+        not overwrite_input or
+        not customize_per_format_input
     ):
         return
+
+    target_mode = settings.get('target_mode', 'selection')
+    target_input.isVisible = target_mode == 'selection'
+    if target_mode == 'full_design':
+        target_hint.formattedText = 'Exports the full design from the root component after temporarily showing everything.'
+    elif target_mode == 'visible_bodies':
+        target_hint.formattedText = 'Exports only bodies that are currently visible in the design.'
+    else:
+        target_hint.formattedText = 'Select a body, component, or occurrence to export.'
+
+    visible_bodies_mode = target_mode == 'visible_bodies'
+    previous_target_mode = (last_target_mode_input.value or '').strip() or target_mode
+    if visible_bodies_mode:
+        if previous_target_mode != 'visible_bodies':
+            f3d_pref_input.value = bool(f3d_checkbox.value)
+        f3d_checkbox.value = False
+        f3d_checkbox.isEnabled = False
+    else:
+        f3d_checkbox.isEnabled = True
+        if previous_target_mode == 'visible_bodies':
+            f3d_checkbox.value = bool(f3d_pref_input.value)
+    format_note.isVisible = visible_bodies_mode
+    format_note.formattedText = 'F3D is unavailable in Export Only Visible Bodies mode because Fusion archive export works at the component level.'
+    last_target_mode_input.value = target_mode
 
     folder_input.isVisible = False
     folder_summary.isVisible = not settings['auto_sort_after_export']
@@ -1034,6 +1197,7 @@ def _sync_ui(command_inputs):
     sorted_output_summary.isVisible = settings['auto_sort_after_export']
     browse_sorted_output_button.isVisible = settings['auto_sort_after_export']
     overwrite_input.isVisible = settings['auto_sort_after_export']
+    customize_per_format_input.tooltip = 'Reveal separate STL, OBJ, 3MF, and F3D settings sections.'
 
     folder_summary.formattedText = _short_path(settings['folder'])
     folder_summary.tooltip = settings['folder']
@@ -1064,8 +1228,8 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
     auto_check_enabled = bool(auto_check_input.value)
 
     if not auto_check_enabled and not manual:
-        status_input.isVisible = False
-        status_input.formattedText = ''
+        status_input.isVisible = True
+        status_input.formattedText = 'Version v{}.'.format(current_version)
         status_input.tooltip = ''
         return
 
@@ -1076,21 +1240,21 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
 
     if has_update:
         status_input.isVisible = True
-        status_input.formattedText = 'Update available: <a href="{}">v{}</a> (current v{}).'.format(latest_url, latest_version, current_version)
+        status_input.formattedText = 'Version v{} - <a href="{}">Update available: v{}</a>'.format(current_version, latest_url, latest_version)
         status_input.tooltip = latest_url
         return
 
     if manual or not auto_check_enabled:
         status_input.isVisible = True
         if release_info.get('error'):
-            status_input.formattedText = 'Unable to check for updates right now.'
+            status_input.formattedText = 'Version v{} - Unable to check for updates right now'.format(current_version)
             status_input.tooltip = str(release_info.get('error', ''))
         else:
-            status_input.formattedText = 'You are up to date (v{}).'.format(current_version)
+            status_input.formattedText = 'Version v{} - Up to date'.format(current_version)
             status_input.tooltip = ''
     else:
-        status_input.isVisible = False
-        status_input.formattedText = ''
+        status_input.isVisible = True
+        status_input.formattedText = 'Version v{}'.format(current_version)
         status_input.tooltip = ''
 
 
@@ -1226,12 +1390,17 @@ def _validate_inputs(command_inputs):
         return False, 'Open a Fusion design before using this command.'
 
     settings = _current_settings_from_inputs(command_inputs)
-    geometry = _root_component() if settings.get('always_export_full_root') else _selected_geometry(command_inputs)
+    target_mode = settings.get('target_mode', 'selection')
+    geometry = _target_geometry(settings, command_inputs)
     if not geometry:
-        return False, 'Select a body, component, or occurrence, or keep a design active to export the root component.'
-    if not _geometry_is_exportable(geometry):
-        if settings.get('always_export_full_root'):
+        if target_mode == 'selection':
+            return False, 'Select a body, component, or occurrence to export.'
+        return False, 'Open a Fusion design before exporting the full design.'
+    if not _geometry_is_exportable(geometry, target_mode):
+        if target_mode == 'full_design':
             return False, 'Nothing exportable was found in the active root design.'
+        if target_mode == 'visible_bodies':
+            return False, 'No visible bodies were found in the active design.'
         return False, 'Nothing exportable was found in the current selection or active design.'
 
     if not settings['formats']:
@@ -1239,9 +1408,9 @@ def _validate_inputs(command_inputs):
 
     for format_key in settings['formats']:
         format_geometry = _geometry_for_format(format_key, geometry)
-        if not format_geometry or not _geometry_is_exportable(format_geometry):
+        if not format_geometry or not _geometry_is_exportable(format_geometry, target_mode):
             if format_key == 'f3d':
-                if settings.get('always_export_full_root'):
+                if target_mode == 'full_design':
                     return False, 'F3D export could not find exportable geometry in the active root design.'
                 return False, 'F3D export requires a component, occurrence, or body selection with actual model geometry, or an active root component with bodies.'
             return False, 'Nothing exportable was found for {} in the current selection or active design.'.format(FORMAT_LABELS[format_key])
@@ -1352,7 +1521,7 @@ def _add_option_inputs(container, scope_key, option_values, label):
 class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
-            settings = _load_settings()
+            settings = _upgrade_settings_file()
             current_project_key = _current_project_key()
             needs_project_seed = bool(
                 current_project_key and (
@@ -1369,7 +1538,28 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
             inputs = cmd.commandInputs
 
-            target_input = inputs.addSelectionInput('geometry', 'Target', 'Select a body, component, or occurrence to export.')
+            target_mode_input = inputs.addDropDownCommandInput(
+                'target_mode',
+                'Target',
+                adsk.core.DropDownStyles.TextListDropDownStyle
+            )
+            target_mode_input.listItems.add(
+                TARGET_MODE_LABELS['full_design'],
+                settings.get('target_mode', 'selection') == 'full_design',
+                ''
+            )
+            target_mode_input.listItems.add(
+                TARGET_MODE_LABELS['visible_bodies'],
+                settings.get('target_mode', 'selection') == 'visible_bodies',
+                ''
+            )
+            target_mode_input.listItems.add(
+                TARGET_MODE_LABELS['selection'],
+                settings.get('target_mode', 'selection') == 'selection',
+                ''
+            )
+
+            target_input = inputs.addSelectionInput('geometry', 'Selection', 'Select a body, component, or occurrence to export.')
             target_input.addSelectionFilter('Bodies')
             target_input.addSelectionFilter('Occurrences')
             target_input.addSelectionFilter('RootComponents')
@@ -1379,10 +1569,39 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             inputs.addTextBoxCommandInput(
                 'target_hint',
                 '',
-                'Leave the target empty to export the active root component.',
-                1,
+                'Select a body, component, or occurrence to export.',
+                2,
                 True
             )
+            target_hint_input = adsk.core.TextBoxCommandInput.cast(inputs.itemById('target_hint'))
+            target_hint_input.isFullWidth = True
+            last_target_mode_input = inputs.addStringValueInput('last_target_mode', 'Last Target Mode', settings.get('target_mode', 'selection'))
+            last_target_mode_input.isVisible = False
+
+            destination_mode_input = inputs.addDropDownCommandInput(
+                'destination_mode',
+                'Destination',
+                adsk.core.DropDownStyles.TextListDropDownStyle
+            )
+            destination_mode_input.listItems.add(
+                DESTINATION_MODE_LABELS['direct'],
+                not settings['auto_sort_after_export'],
+                ''
+            )
+            destination_mode_input.listItems.add(
+                DESTINATION_MODE_LABELS['sorted'],
+                bool(settings['auto_sort_after_export']),
+                ''
+            )
+
+            auto_sort_input = inputs.addBoolValueInput(
+                'auto_sort_after_export',
+                'Sort Automatically After Export',
+                True,
+                '',
+                bool(settings['auto_sort_after_export'])
+            )
+            auto_sort_input.isVisible = False
 
             full_root_input = inputs.addBoolValueInput(
                 'always_export_full_root',
@@ -1391,14 +1610,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 '',
                 bool(settings['always_export_full_root'])
             )
-            full_root_input.tooltip = 'Ignore the current selection, temporarily activate the root component, unisolate everything, and show all bodies before exporting.'
-            inputs.addBoolValueInput(
-                'auto_sort_after_export',
-                'Sort Automatically After Export',
-                True,
-                '',
-                bool(settings['auto_sort_after_export'])
-            )
+            full_root_input.isVisible = False
 
             folder_input = inputs.addStringValueInput('folder', 'Export Folder', settings['folder'])
             folder_input.isVisible = False
@@ -1435,21 +1647,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 bool(settings['allow_overwrite'])
             )
 
-            update_group = inputs.addGroupCommandInput('update_group', 'Updates')
-            update_group.isExpanded = False
-            update_children = update_group.children
-            update_children.addBoolValueInput(
-                'auto_check_updates',
-                'Check for updates automatically',
-                True,
-                '',
-                bool(settings['auto_check_updates'])
-            )
-            update_children.addBoolValueInput('check_updates_now', 'Check for Updates', False, '', False)
-            update_status = inputs.addTextBoxCommandInput('update_status', '', '', 1, True)
-            update_status.isFullWidth = True
-            update_status.isVisible = False
-
             format_group = inputs.addGroupCommandInput('format_group', 'Formats')
             format_inputs = format_group.children
             selected_formats = settings['formats']
@@ -1461,10 +1658,32 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     '',
                     key in selected_formats
                 )
+                if key == 'f3d':
+                    f3d_pref_input = inputs.addBoolValueInput(
+                        'f3d_enabled_preference',
+                        'Remember F3D Preference',
+                        True,
+                        '',
+                        bool(settings.get('f3d_enabled_preference', 'f3d' in selected_formats))
+                    )
+                    f3d_pref_input.isVisible = False
+            format_note = format_inputs.addTextBoxCommandInput('format_note', '', '', 2, True)
+            format_note.isFullWidth = True
+            format_note.isVisible = False
+
+            customize_per_format_input = inputs.addBoolValueInput(
+                'customize_per_format',
+                'Customize Settings Per Format',
+                True,
+                '',
+                settings['settings_mode'] == 'per_format'
+            )
+            customize_per_format_input.tooltip = 'Reveal separate STL, OBJ, 3MF, and F3D settings sections.'
 
             settings_mode_input = inputs.addDropDownCommandInput('settings_mode', 'Settings Scope', adsk.core.DropDownStyles.TextListDropDownStyle)
             for key, label in SETTINGS_MODE_LABELS.items():
                 settings_mode_input.listItems.add(label, key == settings['settings_mode'], '')
+            settings_mode_input.isVisible = False
 
             global_option_values = _settings_for_format(settings, _primary_format(settings))
             global_option_values['filename'] = _default_filename()
@@ -1473,6 +1692,18 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 option_values = dict(settings['per_format_settings'][format_key])
                 option_values['filename'] = _default_filename()
                 _add_option_inputs(inputs, format_key, option_values, '{} Settings'.format(label))
+
+            update_status = inputs.addTextBoxCommandInput('update_status', '', '', 1, True)
+            update_status.isFullWidth = True
+            update_status.isVisible = True
+            inputs.addBoolValueInput(
+                'auto_check_updates',
+                'Check For Updates Automatically',
+                True,
+                '',
+                bool(settings['auto_check_updates'])
+            )
+            inputs.addBoolValueInput('check_updates_now', 'Check For Updates', False, '', False)
 
             _sync_ui(inputs)
             _refresh_update_ui(inputs, force_refresh=False, manual=False)
@@ -1506,7 +1737,9 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
             if changed_input.id in ('browse_folder', 'browse_sorted_output_folder'):
                 button = adsk.core.BoolValueCommandInput.cast(changed_input)
                 dialog = _ui.createFolderDialog()
-                dialog.title = 'Choose Export Folder'
+                dialog.title = 'Choose {}'.format(
+                    'Projects Root Folder' if changed_input.id == 'browse_sorted_output_folder' else 'Export Folder'
+                )
                 result = dialog.showDialog()
                 if result == adsk.core.DialogResults.DialogOK:
                     target_input_map = {
@@ -1520,6 +1753,11 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 button = adsk.core.BoolValueCommandInput.cast(changed_input)
                 _refresh_update_ui(inputs, force_refresh=True, manual=True)
                 button.value = False
+            elif changed_input.id == 'format_f3d':
+                f3d_checkbox = adsk.core.BoolValueCommandInput.cast(changed_input)
+                f3d_pref_input = adsk.core.BoolValueCommandInput.cast(inputs.itemById('f3d_enabled_preference'))
+                if f3d_checkbox and f3d_pref_input:
+                    f3d_pref_input.value = bool(f3d_checkbox.value)
 
             if changed_input.id.endswith('filename'):
                 filename_input = adsk.core.StringValueCommandInput.cast(changed_input)
@@ -1536,10 +1774,15 @@ class ValidateHandler(adsk.core.ValidateInputsEventHandler):
         try:
             valid, message = _validate_inputs(args.inputs)
             args.areInputsValid = valid
+            target_hint = args.inputs.itemById('target_hint')
             if not valid and message:
-                args.inputs.itemById('target_hint').formattedText = message
+                target_hint.formattedText = message
+            elif _target_mode_from_inputs(args.inputs) == 'full_design':
+                target_hint.formattedText = 'Exports the full design from the root component after temporarily showing everything.'
+            elif _target_mode_from_inputs(args.inputs) == 'visible_bodies':
+                target_hint.formattedText = 'Exports only bodies that are currently visible in the design.'
             else:
-                args.inputs.itemById('target_hint').formattedText = 'Leave the target empty to export the active root component.'
+                target_hint.formattedText = 'Select a body, component, or occurrence to export.'
         except Exception:
             args.areInputsValid = False
 
@@ -1548,6 +1791,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         progress_dialog = None
         export_succeeded = False
+        export_cancelled = False
         temp_staging_dir = None
         full_root_state = None
         design = None
@@ -1559,9 +1803,12 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
 
             settings = _current_settings_from_inputs(inputs)
             design = _active_design()
-            geometry = _root_component() if settings['always_export_full_root'] else _selected_geometry(inputs)
-            if settings['always_export_full_root']:
+            target_mode = settings.get('target_mode', 'selection')
+            geometry = _target_geometry(settings, inputs)
+            if target_mode == 'full_design':
                 full_root_state = _prepare_full_root_export(design)
+            elif target_mode == 'visible_bodies':
+                full_root_state = _prepare_visible_bodies_export(design)
 
             total_exports = len(settings['formats'])
             progress_dialog = _ui.createProgressDialog() if _ui else None
@@ -1628,15 +1875,25 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                     scanned_conflicts = scan_export_conflicts(temp_staging_dir, settings['sorted_output_folder'])
                     if scanned_conflicts:
                         conflict_action = _choose_sort_conflict_action(scanned_conflicts)
+                        if conflict_action == 'skip':
+                            export_cancelled = True
                         conflict_resolver = (lambda source, target, operation, keep_both_target, action=conflict_action: action)
                     else:
-                        conflict_resolver = _choose_single_sort_conflict_action
-                process_exports(
+                        def _tracking_single_conflict_resolver(source, target, operation, keep_both_target):
+                            nonlocal export_cancelled
+                            action = _choose_single_sort_conflict_action(source, target, operation, keep_both_target)
+                            if action == 'skip':
+                                export_cancelled = True
+                            return action
+                        conflict_resolver = _tracking_single_conflict_resolver
+                sort_result = process_exports(
                     temp_staging_dir,
                     settings['sorted_output_folder'],
                     allow_overwrite=settings['allow_overwrite'],
                     conflict_resolver=conflict_resolver
                 )
+                if sort_result.get('conflicts_skipped'):
+                    export_cancelled = True
 
             _save_settings(settings)
             export_succeeded = True
@@ -1647,7 +1904,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 try:
                     if export_succeeded:
                         progress_dialog.progressValue = len(settings['formats']) if 'settings' in locals() else progress_dialog.progressValue
-                        progress_dialog.message = 'Export successful.'
+                        progress_dialog.message = 'Export cancelled.' if export_cancelled else 'Export successful.'
                         adsk.doEvents()
                         time.sleep(1)
                     progress_dialog.hide()
