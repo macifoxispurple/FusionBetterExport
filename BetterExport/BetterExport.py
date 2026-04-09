@@ -5,6 +5,8 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.error
+import urllib.request
 
 import adsk.core
 import adsk.fusion
@@ -30,6 +32,10 @@ UTILITIES_TAB_CANDIDATE_IDS = [
 ]
 
 SETTINGS_PATH = os.path.join(os.path.dirname(__file__), 'settings.json')
+MANIFEST_PATH = os.path.join(os.path.dirname(__file__), 'BetterExport.manifest')
+LATEST_RELEASE_API_URL = 'https://api.github.com/repos/macifoxispurple/FusionBetterExport/releases/latest'
+LATEST_RELEASE_PAGE_URL = 'https://github.com/macifoxispurple/FusionBetterExport/releases/latest'
+UPDATE_CACHE_MAX_AGE_SECONDS = 12 * 60 * 60
 
 FORMAT_LABELS = {
     'stl': 'STL',
@@ -78,9 +84,11 @@ GENERAL_DEFAULTS = {
     'folder': os.path.expanduser('~'),
     'sorted_output_folder': os.path.expanduser('~'),
     'auto_sort_after_export': False,
+    'auto_check_updates': True,
     'allow_overwrite': True,
     'project_export_folders': {},
-    'project_auto_sort_preferences': {}
+    'project_auto_sort_preferences': {},
+    'update_check': {}
 }
 
 DEFAULT_SETTINGS = {
@@ -167,6 +175,7 @@ def _merge_settings(values):
     merged['per_format_settings'] = _normalized_per_format_settings(merged.get('per_format_settings'))
     merged['project_export_folders'] = _normalized_project_export_folders(merged.get('project_export_folders'))
     merged['project_auto_sort_preferences'] = _normalized_project_auto_sort_preferences(merged.get('project_auto_sort_preferences'))
+    merged['update_check'] = _normalized_update_check(merged.get('update_check'))
     for key, default_value in GENERAL_DEFAULTS.items():
         merged[key] = merged.get(key, default_value)
     for key, default_value in OPTION_DEFAULTS.items():
@@ -215,6 +224,7 @@ def _save_settings(values):
     settings['per_format_settings'] = _normalized_per_format_settings(settings.get('per_format_settings'))
     settings['project_export_folders'] = _normalized_project_export_folders(settings.get('project_export_folders'))
     settings['project_auto_sort_preferences'] = _normalized_project_auto_sort_preferences(settings.get('project_auto_sort_preferences'))
+    settings['update_check'] = _normalized_update_check(settings.get('update_check'))
     project_key = _current_project_key()
     if project_key and settings.get('folder'):
         settings['project_export_folders'][project_key] = settings['folder']
@@ -261,6 +271,21 @@ def _normalized_project_auto_sort_preferences(value):
     for key, enabled in value.items():
         if isinstance(key, str) and key.strip():
             normalized[key.strip()] = bool(enabled)
+    return normalized
+
+
+def _normalized_update_check(value):
+    if not isinstance(value, dict):
+        return {}
+    normalized = {}
+    if isinstance(value.get('checked_at'), (int, float)):
+        normalized['checked_at'] = float(value['checked_at'])
+    if isinstance(value.get('latest_version'), str):
+        normalized['latest_version'] = value['latest_version'].strip()
+    if isinstance(value.get('latest_url'), str):
+        normalized['latest_url'] = value['latest_url'].strip()
+    if isinstance(value.get('error'), str):
+        normalized['error'] = value['error'].strip()
     return normalized
 
 
@@ -333,6 +358,90 @@ def _sanitize_filename(name):
 
 def _format_extension(format_key):
     return '3mf' if format_key == '3mf' else format_key
+
+
+def _current_addin_version():
+    try:
+        with open(MANIFEST_PATH, 'r', encoding='utf-8') as handle:
+            return str(json.load(handle).get('version', '')).strip() or '0.0.0'
+    except Exception:
+        return '0.0.0'
+
+
+def _version_parts(version_text):
+    text = (version_text or '').strip().lower()
+    if text.startswith('v'):
+        text = text[1:]
+    parts = []
+    for part in text.split('.'):
+        digits = ''.join(ch for ch in part if ch.isdigit())
+        parts.append(int(digits or '0'))
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def _is_version_newer(candidate_version, current_version):
+    return _version_parts(candidate_version) > _version_parts(current_version)
+
+
+def _save_update_check(update_check):
+    settings = _load_settings_for_save()
+    settings['update_check'] = _normalized_update_check(update_check)
+    with open(SETTINGS_PATH, 'w', encoding='utf-8') as handle:
+        json.dump(_merge_settings(settings), handle, indent=2, sort_keys=True)
+
+
+def _fetch_latest_release_info():
+    request = urllib.request.Request(
+        LATEST_RELEASE_API_URL,
+        headers={
+            'Accept': 'application/vnd.github+json',
+            'User-Agent': 'BetterExport'
+        }
+    )
+    with urllib.request.urlopen(request, timeout=4) as response:
+        payload = json.loads(response.read().decode('utf-8'))
+
+    latest_version = str(payload.get('tag_name') or payload.get('name') or '').strip()
+    if latest_version.lower().startswith('v'):
+        latest_version = latest_version[1:]
+
+    latest_url = str(payload.get('html_url') or LATEST_RELEASE_PAGE_URL).strip() or LATEST_RELEASE_PAGE_URL
+    if not latest_version:
+        raise ValueError('GitHub did not return a release version.')
+
+    return {
+        'checked_at': time.time(),
+        'latest_version': latest_version,
+        'latest_url': latest_url,
+        'error': ''
+    }
+
+
+def _latest_release_info(force_refresh=False):
+    settings = _load_settings_for_save()
+    cached = _normalized_update_check(settings.get('update_check'))
+    checked_at = cached.get('checked_at', 0)
+    is_fresh = bool(checked_at and (time.time() - checked_at) < UPDATE_CACHE_MAX_AGE_SECONDS)
+
+    if cached and not force_refresh and is_fresh:
+        return cached
+
+    try:
+        latest = _fetch_latest_release_info()
+        _save_update_check(latest)
+        return latest
+    except Exception as exc:
+        if cached:
+            cached['error'] = str(exc)
+            return cached
+        return {
+            'checked_at': time.time(),
+            'latest_version': '',
+            'latest_url': LATEST_RELEASE_PAGE_URL,
+            'error': str(exc)
+        }
 
 
 def _normalized_formats(formats_value, legacy_format=None):
@@ -412,12 +521,14 @@ def _read_general_settings(inputs):
     folder = _read_string_input(inputs, 'folder')
     sorted_output_folder = _read_string_input(inputs, 'sorted_output_folder')
     auto_sort_after_export = _read_bool_input(inputs, 'auto_sort_after_export')
+    auto_check_updates = _read_bool_input(inputs, 'auto_check_updates')
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
 
     if None in (
         folder,
         sorted_output_folder,
         auto_sort_after_export,
+        auto_check_updates,
         allow_overwrite
     ):
         return None
@@ -426,6 +537,7 @@ def _read_general_settings(inputs):
         'folder': folder,
         'sorted_output_folder': sorted_output_folder,
         'auto_sort_after_export': auto_sort_after_export,
+        'auto_check_updates': auto_check_updates,
         'allow_overwrite': allow_overwrite
     }
 
@@ -784,6 +896,47 @@ def _sync_ui(command_inputs):
         _sync_option_scope_ui(command_inputs, format_key, option_values, capabilities, group_visible, settings['auto_sort_after_export'])
 
 
+def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
+    status_input = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('update_status'))
+    auto_check_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('auto_check_updates'))
+
+    if not status_input or not auto_check_input:
+        return
+
+    current_version = _current_addin_version()
+    auto_check_enabled = bool(auto_check_input.value)
+
+    if not auto_check_enabled and not manual:
+        status_input.isVisible = False
+        status_input.formattedText = ''
+        status_input.tooltip = ''
+        return
+
+    release_info = _latest_release_info(force_refresh=force_refresh)
+    latest_version = release_info.get('latest_version', '')
+    latest_url = release_info.get('latest_url') or LATEST_RELEASE_PAGE_URL
+    has_update = bool(latest_version and _is_version_newer(latest_version, current_version))
+
+    if has_update:
+        status_input.isVisible = True
+        status_input.formattedText = 'Update available: <a href="{}">v{}</a> (current v{}).'.format(latest_url, latest_version, current_version)
+        status_input.tooltip = latest_url
+        return
+
+    if manual or not auto_check_enabled:
+        status_input.isVisible = True
+        if release_info.get('error'):
+            status_input.formattedText = 'Unable to check for updates right now.'
+            status_input.tooltip = str(release_info.get('error', ''))
+        else:
+            status_input.formattedText = 'You are up to date (v{}).'.format(current_version)
+            status_input.tooltip = ''
+    else:
+        status_input.isVisible = False
+        status_input.formattedText = ''
+        status_input.tooltip = ''
+
+
 def _show_error(message):
     if _ui:
         _ui.messageBox(message, COMMAND_NAME)
@@ -1038,6 +1191,21 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 bool(settings['allow_overwrite'])
             )
 
+            update_group = inputs.addGroupCommandInput('update_group', 'Updates')
+            update_group.isExpanded = False
+            update_children = update_group.children
+            update_children.addBoolValueInput(
+                'auto_check_updates',
+                'Check for updates automatically',
+                True,
+                '',
+                bool(settings['auto_check_updates'])
+            )
+            update_children.addBoolValueInput('check_updates_now', 'Check for Updates', False, '', False)
+            update_status = inputs.addTextBoxCommandInput('update_status', '', '', 1, True)
+            update_status.isFullWidth = True
+            update_status.isVisible = False
+
             format_group = inputs.addGroupCommandInput('format_group', 'Formats')
             format_inputs = format_group.children
             selected_formats = settings['formats']
@@ -1063,6 +1231,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 _add_option_inputs(inputs, format_key, option_values, '{} Settings'.format(label))
 
             _sync_ui(inputs)
+            _refresh_update_ui(inputs, force_refresh=False, manual=False)
 
             on_execute = ExecuteHandler()
             cmd.execute.add(on_execute)
@@ -1102,6 +1271,10 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                     }
                     folder_input = adsk.core.StringValueCommandInput.cast(inputs.itemById(target_input_map[changed_input.id]))
                     folder_input.value = dialog.folder
+                button.value = False
+            elif changed_input.id == 'check_updates_now':
+                button = adsk.core.BoolValueCommandInput.cast(changed_input)
+                _refresh_update_ui(inputs, force_refresh=True, manual=True)
                 button.value = False
 
             if changed_input.id.endswith('filename'):

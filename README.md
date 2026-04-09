@@ -28,6 +28,7 @@ This add-in is meant to make that process feel much less repetitive.
 - Show export progress while the batch is running
 - Optionally auto-sort exported files into project folders after export
 - Hide mesh-only controls in `F3D` per-format settings, so that group only shows options Fusion actually supports
+- Check GitHub for new releases, let the user disable automatic checks, and show a direct in-add-in link when an update is available
 
 ## Export sorting
 
@@ -89,6 +90,7 @@ If nothing is selected, the add-in exports the active root component.
 - Settings are stored locally in `BetterExport/settings.json`.
 - Most preferences save as soon as you change them, even if you close the dialog without exporting.
 - `File Name` is intentionally not persisted. It refreshes from the active Fusion document each time the dialog opens.
+- The add-in can check GitHub for newer releases. Automatic checks can be turned off, and if GitHub is unavailable the check fails quietly unless you ask for one manually.
 - Fusion's API support varies a bit by version, so some options are shown only when your installed Fusion build exposes them.
 
 ## Project files
