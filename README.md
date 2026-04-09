@@ -27,8 +27,6 @@ This add-in is meant to make that process feel much less repetitive.
 - Add a right-click Browser context menu entry for exportable selections
 - Show export progress while the batch is running
 - Optionally auto-sort exported files into project folders after export
-- Hide mesh-only controls in `F3D` per-format settings, so that group only shows options Fusion actually supports
-- Check GitHub for new releases, let the user disable automatic checks, and show a direct in-add-in link when an update is available
 
 ## Export sorting
 
