@@ -397,7 +397,8 @@ def _fetch_latest_release_info():
         LATEST_RELEASE_API_URL,
         headers={
             'Accept': 'application/vnd.github+json',
-            'User-Agent': 'BetterExport'
+            'User-Agent': 'BetterExport',
+            'Cache-Control': 'no-cache'
         }
     )
     with urllib.request.urlopen(request, timeout=4) as response:
@@ -419,7 +420,7 @@ def _fetch_latest_release_info():
     }
 
 
-def _latest_release_info(force_refresh=False):
+def _latest_release_info(force_refresh=False, allow_cached_on_error=True):
     settings = _load_settings_for_save()
     cached = _normalized_update_check(settings.get('update_check'))
     checked_at = cached.get('checked_at', 0)
@@ -433,7 +434,7 @@ def _latest_release_info(force_refresh=False):
         _save_update_check(latest)
         return latest
     except Exception as exc:
-        if cached:
+        if cached and allow_cached_on_error:
             cached['error'] = str(exc)
             return cached
         return {
@@ -912,7 +913,7 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
         status_input.tooltip = ''
         return
 
-    release_info = _latest_release_info(force_refresh=force_refresh)
+    release_info = _latest_release_info(force_refresh=force_refresh, allow_cached_on_error=not manual)
     latest_version = release_info.get('latest_version', '')
     latest_url = release_info.get('latest_url') or LATEST_RELEASE_PAGE_URL
     has_update = bool(latest_version and _is_version_newer(latest_version, current_version))
