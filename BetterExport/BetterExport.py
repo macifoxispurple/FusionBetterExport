@@ -2348,7 +2348,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             target_input.addSelectionFilter('Occurrences')
             target_input.addSelectionFilter('RootComponents')
             target_input.setSelectionLimits(0, 1)
-            target_input.tooltip = 'Leave this empty to export the active root component. F3D exports use the resolved component from the selection.'
+            target_input.tooltip = 'Choose a body, component, or occurrence. To export everything from the root component, switch Target to Export Full Design.'
 
             inputs.addTextBoxCommandInput(
                 'target_hint',
