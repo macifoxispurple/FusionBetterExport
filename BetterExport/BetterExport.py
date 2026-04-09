@@ -583,6 +583,16 @@ def _set_run_on_startup(enabled):
     script_item.isRunOnStartup = bool(enabled)
 
 
+def _set_manifest_version(version_text):
+    if not version_text:
+        return
+    with open(MANIFEST_PATH, 'r', encoding='utf-8') as handle:
+        manifest = json.load(handle)
+    manifest['version'] = str(version_text).strip()
+    with open(MANIFEST_PATH, 'w', encoding='utf-8') as handle:
+        json.dump(manifest, handle, indent=2)
+
+
 def _stage_update_payload(release_info):
     latest_version = release_info.get('latest_version', '')
     asset_url = release_info.get('latest_asset_url', '')
@@ -608,6 +618,7 @@ def _stage_update_payload(release_info):
 
     _write_update_helper()
     _set_run_on_startup(True)
+    _set_manifest_version(latest_version)
 
     update_info = {
         'latest_version': latest_version,
