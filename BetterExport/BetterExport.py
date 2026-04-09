@@ -632,15 +632,90 @@ def _try_restart_updated_addin():
     try:
         if bool(_safe_call(lambda: script_item.isRunning)):
             script_item.stop()
-            for _ in range(10):
+            for _ in range(20):
                 adsk.doEvents()
-                time.sleep(0.05)
+                time.sleep(0.1)
                 if not bool(_safe_call(lambda: script_item.isRunning)):
                     break
-        started = script_item.run(False)
-        if not started:
+
+        # Give Fusion a little breathing room before the first restart attempt.
+        for _ in range(5):
+            adsk.doEvents()
+            time.sleep(0.1)
+
+        first_started = bool(_safe_call(lambda: script_item.run(False)))
+        for _ in range(10):
+            adsk.doEvents()
+            time.sleep(0.1)
+
+        if bool(_safe_call(lambda: script_item.isRunning)):
+            return True, ''
+
+        # If the first restart didn't stick, try once more after a short delay.
+        second_started = bool(_safe_call(lambda: script_item.run(False)))
+        for _ in range(10):
+            adsk.doEvents()
+            time.sleep(0.1)
+
+        if bool(_safe_call(lambda: script_item.isRunning)):
+            return True, ''
+        if not first_started and not second_started:
             return False, 'Fusion reported that the add-in could not be started again automatically.'
-        return True, ''
+        return False, 'Fusion accepted the restart request, but Better Export was not running afterward.'
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _try_cycle_addin_after_staging():
+    if _ui:
+        try:
+            _ui.terminateActiveCommand()
+            for _ in range(10):
+                adsk.doEvents()
+                time.sleep(0.1)
+        except Exception:
+            pass
+
+    scripts = _safe_call(lambda: _app.scripts)
+    if not scripts:
+        return False, 'Fusion did not expose the scripts API.'
+
+    script_item = _safe_call(lambda: scripts.itemByPath(ADDIN_DIR))
+    if not script_item:
+        return False, 'Fusion could not find Better Export by its add-in folder path.'
+
+    try:
+        stop_result = script_item.stop()
+        for _ in range(20):
+            adsk.doEvents()
+            time.sleep(0.1)
+            if not bool(_safe_call(lambda: script_item.isRunning)):
+                break
+
+        for _ in range(5):
+            adsk.doEvents()
+            time.sleep(0.1)
+
+        first_started = bool(_safe_call(lambda: script_item.run(False)))
+        for _ in range(10):
+            adsk.doEvents()
+            time.sleep(0.1)
+
+        if bool(_safe_call(lambda: script_item.isRunning)):
+            return True, ''
+
+        second_started = bool(_safe_call(lambda: script_item.run(False)))
+        for _ in range(10):
+            adsk.doEvents()
+            time.sleep(0.1)
+
+        if not stop_result and bool(_safe_call(lambda: script_item.isRunning)):
+            return False, 'Fusion did not stop the currently running add-in.'
+        if bool(_safe_call(lambda: script_item.isRunning)):
+            return True, ''
+        if not first_started and not second_started:
+            return False, 'Fusion did not restart Better Export automatically after staging the update.'
+        return False, 'Fusion accepted the staged restart request, but Better Export was not running afterward.'
     except Exception as exc:
         return False, str(exc)
 
@@ -1940,10 +2015,12 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                     _show_error('No newer release is available right now.')
                 else:
                     update_info = _stage_update_payload(release_info)
-                    if _ui:
+                    cycled, cycle_error = _try_cycle_addin_after_staging()
+                    if _ui and not cycled:
                         _ui.messageBox(
-                            'Better Export v{} has been downloaded and staged.\n\nDisable and enable Better Export once to apply the update. If Fusion does not restart it automatically after that, disable and enable it one more time to use the new version.'.format(
-                                update_info['latest_version']
+                            'Better Export v{} has been downloaded and staged.\n\nFusion could not automatically cycle the add-in from inside the current command.\n\nDisable and enable Better Export once to apply the update. If Fusion does not restart it automatically after that, disable and enable it one more time to use the new version.\n\nReason: {}'.format(
+                                update_info['latest_version'],
+                                cycle_error or 'Unknown restart error'
                             ),
                             COMMAND_NAME
                         )
