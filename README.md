@@ -122,7 +122,7 @@ If nothing is selected, the add-in exports the active root component.
 - Most preferences save as soon as you change them, even if you close the dialog without exporting.
 - `File Name` is intentionally not persisted. It refreshes from the active Fusion document each time the dialog opens.
 - The `Target` control lets you export the full design, only currently visible bodies, or a specific selection. `Export Full Design` temporarily exports from the root component and then restores the previous view state afterward.
-- The add-in can let you know when a newer release is available, and you can also check manually from inside Fusion whenever you want.
+- The add-in can let you know when a newer release is available, and you can also stage an update from inside Fusion when a new release is ready.
 - Fusion's API support varies a bit by version, so some options are shown only when your installed Fusion build exposes them.
 
 ## Project files

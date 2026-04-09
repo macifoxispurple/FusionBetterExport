@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import os
 import shutil
 import sys
@@ -7,6 +8,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import zipfile
 
 import adsk.core
 import adsk.fusion
@@ -36,6 +38,9 @@ MANIFEST_PATH = os.path.join(os.path.dirname(__file__), 'BetterExport.manifest')
 LATEST_RELEASE_API_URL = 'https://api.github.com/repos/macifoxispurple/FusionBetterExport/releases/latest'
 LATEST_RELEASE_PAGE_URL = 'https://github.com/macifoxispurple/FusionBetterExport/releases/latest'
 UPDATE_CACHE_MAX_AGE_SECONDS = 5 * 60
+PENDING_UPDATE_DIR = os.path.join(ADDIN_DIR, '_pending_update')
+PENDING_UPDATE_INFO_PATH = os.path.join(PENDING_UPDATE_DIR, 'update.json')
+UPDATE_HELPER_PATH = os.path.join(ADDIN_DIR, 'update_helper.py')
 
 FORMAT_LABELS = {
     'stl': 'STL',
@@ -307,6 +312,10 @@ def _normalized_update_check(value):
         normalized['latest_version'] = value['latest_version'].strip()
     if isinstance(value.get('latest_url'), str):
         normalized['latest_url'] = value['latest_url'].strip()
+    if isinstance(value.get('latest_asset_url'), str):
+        normalized['latest_asset_url'] = value['latest_asset_url'].strip()
+    if isinstance(value.get('latest_asset_name'), str):
+        normalized['latest_asset_name'] = value['latest_asset_name'].strip()
     if isinstance(value.get('error'), str):
         normalized['error'] = value['error'].strip()
     return normalized
@@ -421,6 +430,16 @@ def _upgrade_settings_file():
     return _load_settings()
 
 
+def _release_zip_asset(payload):
+    assets = payload.get('assets') or []
+    zip_assets = [asset for asset in assets if str(asset.get('name', '')).lower().endswith('.zip')]
+    for asset in zip_assets:
+        name = str(asset.get('name') or '')
+        if name.lower().startswith('betterexport-'):
+            return asset
+    return zip_assets[0] if zip_assets else {}
+
+
 def _fetch_latest_release_info():
     request = urllib.request.Request(
         LATEST_RELEASE_API_URL,
@@ -438,6 +457,9 @@ def _fetch_latest_release_info():
         latest_version = latest_version[1:]
 
     latest_url = str(payload.get('html_url') or LATEST_RELEASE_PAGE_URL).strip() or LATEST_RELEASE_PAGE_URL
+    asset = _release_zip_asset(payload)
+    latest_asset_url = str(asset.get('browser_download_url') or '').strip()
+    latest_asset_name = str(asset.get('name') or '').strip()
     if not latest_version:
         raise ValueError('GitHub did not return a release version.')
 
@@ -445,6 +467,8 @@ def _fetch_latest_release_info():
         'checked_at': time.time(),
         'latest_version': latest_version,
         'latest_url': latest_url,
+        'latest_asset_url': latest_asset_url,
+        'latest_asset_name': latest_asset_name,
         'error': ''
     }
 
@@ -470,8 +494,155 @@ def _latest_release_info(force_refresh=False, allow_cached_on_error=True):
             'checked_at': time.time(),
             'latest_version': '',
             'latest_url': LATEST_RELEASE_PAGE_URL,
+            'latest_asset_url': '',
+            'latest_asset_name': '',
             'error': str(exc)
         }
+
+
+def _download_release_asset(asset_url, destination_path):
+    request = urllib.request.Request(
+        asset_url,
+        headers={
+            'User-Agent': 'BetterExport',
+            'Cache-Control': 'no-cache'
+        }
+    )
+    with urllib.request.urlopen(request, timeout=20) as response, open(destination_path, 'wb') as handle:
+        shutil.copyfileobj(response, handle)
+
+
+def _find_extracted_addin_dir(extract_root):
+    direct = os.path.join(extract_root, 'BetterExport')
+    if os.path.isdir(direct):
+        return direct
+
+    for entry in os.listdir(extract_root):
+        candidate = os.path.join(extract_root, entry, 'BetterExport')
+        if os.path.isdir(candidate):
+            return candidate
+
+    return ''
+
+
+def _updater_script_contents():
+    return r'''import os
+import shutil
+
+
+def apply_update(source_dir, target_dir, skip_names=None):
+    skip_names = set(skip_names or [])
+    os.makedirs(target_dir, exist_ok=True)
+    for name in os.listdir(source_dir):
+        if name in skip_names:
+            continue
+        source_path = os.path.join(source_dir, name)
+        target_path = os.path.join(target_dir, name)
+        if os.path.isdir(source_path):
+            os.makedirs(target_path, exist_ok=True)
+            apply_update(source_path, target_path, skip_names=None)
+        else:
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            shutil.copy2(source_path, target_path)
+
+
+if __name__ == '__main__':
+    import sys
+    apply_update(sys.argv[1], sys.argv[2], set(sys.argv[3:]))
+'''
+
+
+def _write_update_helper():
+    with open(UPDATE_HELPER_PATH, 'w', encoding='utf-8') as handle:
+        handle.write(_updater_script_contents())
+
+
+def _stage_update_payload(release_info):
+    latest_version = release_info.get('latest_version', '')
+    asset_url = release_info.get('latest_asset_url', '')
+    asset_name = release_info.get('latest_asset_name') or 'BetterExport-{}.zip'.format(latest_version or 'update')
+
+    if not asset_url:
+        raise ValueError('No downloadable release package was found for the latest version.')
+
+    if os.path.isdir(PENDING_UPDATE_DIR):
+        shutil.rmtree(PENDING_UPDATE_DIR, ignore_errors=True)
+    os.makedirs(PENDING_UPDATE_DIR, exist_ok=True)
+
+    zip_path = os.path.join(PENDING_UPDATE_DIR, asset_name)
+    extract_root = os.path.join(PENDING_UPDATE_DIR, 'extracted')
+    os.makedirs(extract_root, exist_ok=True)
+    _download_release_asset(asset_url, zip_path)
+    with zipfile.ZipFile(zip_path, 'r') as archive:
+        archive.extractall(extract_root)
+
+    extracted_addin_dir = _find_extracted_addin_dir(extract_root)
+    if not extracted_addin_dir:
+        raise ValueError('The downloaded release package did not contain a BetterExport add-in folder.')
+
+    _write_update_helper()
+    update_info = {
+        'latest_version': latest_version,
+        'staged_addin_dir': extracted_addin_dir,
+        'staged_at': time.time()
+    }
+    with open(PENDING_UPDATE_INFO_PATH, 'w', encoding='utf-8') as handle:
+        json.dump(update_info, handle, indent=2, sort_keys=True)
+    return update_info
+
+
+def _apply_pending_update_if_needed():
+    if not os.path.exists(PENDING_UPDATE_INFO_PATH) or not os.path.exists(UPDATE_HELPER_PATH):
+        return None
+
+    try:
+        with open(PENDING_UPDATE_INFO_PATH, 'r', encoding='utf-8') as handle:
+            update_info = json.load(handle)
+        staged_addin_dir = str(update_info.get('staged_addin_dir') or '').strip()
+        latest_version = str(update_info.get('latest_version') or '').strip()
+        if not staged_addin_dir or not os.path.isdir(staged_addin_dir):
+            raise ValueError('The staged update files are missing.')
+
+        spec = importlib.util.spec_from_file_location('better_export_update_helper', UPDATE_HELPER_PATH)
+        if not spec or not spec.loader:
+            raise RuntimeError('Could not load the update helper.')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.apply_update(staged_addin_dir, ADDIN_DIR, {'settings.json', os.path.basename(UPDATE_HELPER_PATH), os.path.basename(PENDING_UPDATE_DIR)})
+
+        pycache_dir = os.path.join(ADDIN_DIR, '__pycache__')
+        if os.path.isdir(pycache_dir):
+            shutil.rmtree(pycache_dir, ignore_errors=True)
+
+        shutil.rmtree(PENDING_UPDATE_DIR, ignore_errors=True)
+        return {'latest_version': latest_version or _current_addin_version(), 'error': ''}
+    except Exception as exc:
+        return {'latest_version': '', 'error': str(exc)}
+
+
+def _try_restart_updated_addin():
+    scripts = _safe_call(lambda: _app.scripts)
+    if not scripts:
+        return False, 'Fusion did not expose the scripts API.'
+
+    script_item = _safe_call(lambda: scripts.itemByPath(ADDIN_DIR))
+    if not script_item:
+        return False, 'Fusion could not find Better Export by its add-in folder path.'
+
+    try:
+        if bool(_safe_call(lambda: script_item.isRunning)):
+            script_item.stop()
+            for _ in range(10):
+                adsk.doEvents()
+                time.sleep(0.05)
+                if not bool(_safe_call(lambda: script_item.isRunning)):
+                    break
+        started = script_item.run(False)
+        if not started:
+            return False, 'Fusion reported that the add-in could not be started again automatically.'
+        return True, ''
+    except Exception as exc:
+        return False, str(exc)
 
 
 def _normalized_formats(formats_value, legacy_format=None):
@@ -1220,8 +1391,9 @@ def _sync_ui(command_inputs):
 def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
     status_input = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('update_status'))
     auto_check_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('auto_check_updates'))
+    update_now_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('update_now'))
 
-    if not status_input or not auto_check_input:
+    if not status_input or not auto_check_input or not update_now_input:
         return
 
     current_version = _current_addin_version()
@@ -1229,8 +1401,9 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
 
     if not auto_check_enabled and not manual:
         status_input.isVisible = True
-        status_input.formattedText = 'Version v{}.'.format(current_version)
+        status_input.formattedText = 'Version v{}'.format(current_version)
         status_input.tooltip = ''
+        update_now_input.isVisible = False
         return
 
     release_info = _latest_release_info(force_refresh=force_refresh, allow_cached_on_error=not manual)
@@ -1242,6 +1415,7 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
         status_input.isVisible = True
         status_input.formattedText = 'Version v{} - <a href="{}">Update available: v{}</a>'.format(current_version, latest_url, latest_version)
         status_input.tooltip = latest_url
+        update_now_input.isVisible = True
         return
 
     if manual or not auto_check_enabled:
@@ -1252,10 +1426,12 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
         else:
             status_input.formattedText = 'Version v{} - Up to date'.format(current_version)
             status_input.tooltip = ''
+        update_now_input.isVisible = False
     else:
         status_input.isVisible = True
         status_input.formattedText = 'Version v{}'.format(current_version)
         status_input.tooltip = ''
+        update_now_input.isVisible = False
 
 
 def _show_error(message):
@@ -1704,6 +1880,8 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 bool(settings['auto_check_updates'])
             )
             inputs.addBoolValueInput('check_updates_now', 'Check For Updates', False, '', False)
+            update_now_input = inputs.addBoolValueInput('update_now', 'Update Now', False, '', False)
+            update_now_input.isVisible = False
 
             _sync_ui(inputs)
             _refresh_update_ui(inputs, force_refresh=False, manual=False)
@@ -1752,6 +1930,23 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
             elif changed_input.id == 'check_updates_now':
                 button = adsk.core.BoolValueCommandInput.cast(changed_input)
                 _refresh_update_ui(inputs, force_refresh=True, manual=True)
+                button.value = False
+            elif changed_input.id == 'update_now':
+                button = adsk.core.BoolValueCommandInput.cast(changed_input)
+                release_info = _latest_release_info(force_refresh=True, allow_cached_on_error=False)
+                latest_version = release_info.get('latest_version', '')
+                current_version = _current_addin_version()
+                if not latest_version or not _is_version_newer(latest_version, current_version):
+                    _show_error('No newer release is available right now.')
+                else:
+                    update_info = _stage_update_payload(release_info)
+                    if _ui:
+                        _ui.messageBox(
+                            'Better Export v{} has been downloaded and staged.\n\nDisable and enable Better Export once to apply the update. If Fusion does not restart it automatically after that, disable and enable it one more time to use the new version.'.format(
+                                update_info['latest_version']
+                            ),
+                            COMMAND_NAME
+                        )
                 button.value = False
             elif changed_input.id == 'format_f3d':
                 f3d_checkbox = adsk.core.BoolValueCommandInput.cast(changed_input)
@@ -1961,6 +2156,26 @@ def run(context):
     try:
         _app = adsk.core.Application.get()
         _ui = _app.userInterface
+
+        update_result = _apply_pending_update_if_needed()
+        if update_result:
+            if update_result.get('error'):
+                _ui.messageBox(
+                    'Better Export could not apply the staged update:\n{}'.format(update_result['error']),
+                    COMMAND_NAME
+                )
+            else:
+                restarted, restart_error = _try_restart_updated_addin()
+                if restarted:
+                    return
+                _ui.messageBox(
+                    'Better Export v{} has been installed.\n\nFusion could not restart the add-in automatically.\n\nDisable and enable Better Export once more to start the new version.\n\nReason: {}'.format(
+                        update_result['latest_version'],
+                        restart_error or 'Unknown restart error'
+                    ),
+                    COMMAND_NAME
+                )
+            return
 
         command_definition = _ui.commandDefinitions.itemById(COMMAND_ID)
         if not command_definition:
