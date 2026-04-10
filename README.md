@@ -1,43 +1,46 @@
 # Better Export
 
-Better Export is a Fusion add-in for people who are tired of setting the same export options over and over again.
+**Better Export** is an Autodesk Fusion add-in that makes repeated exports faster, cleaner, and more consistent.
 
-It pulls common mesh and CAD export formats into one place, remembers the settings you care about, and can optionally sort exported files into tidy project folders afterward.
+It brings common mesh and CAD export formats into one place, remembers the settings you actually use, and can optionally sort exported files into organized project folders automatically. It is designed for people who export often and want a smoother workflow than Fusion’s default export flow provides.
 
-## Why I made it
+<img width="534" height="1169" alt="image" src="https://github.com/user-attachments/assets/8185c05e-436f-4098-b679-dc705aac4316" />
 
-Fusion's built-in export tools work, but if you export the same kinds of files repeatedly, the workflow gets old fast:
+## Features
 
-- re-select the same format options every time
-- re-enter the same folders
-- export multiple formats one by one
-- clean up the resulting files manually afterward
+Better Export can:
 
-This add-in is meant to make that process feel much less repetitive.
+- Export `STL`, `OBJ`, `3MF`, `F3D`, `IGES`, `SAT`, `SMT`, `STEP`, and `USDZ`
+- Export multiple formats in a single pass
+- Remember commonly used settings and folders
+- Support either direct export or automatic post-export sorting
+- Keep project-specific behavior where it matters, including export folders and auto-sort preferences
+- Export either currently visible bodies or a specific selection
+- Use either shared settings across formats or separate settings per format
+- Send a single mesh export directly to Fusion’s print utility workflow
+- Open the export destination automatically after a successful export
+- Integrate naturally into Fusion with a toolbar button, Browser context-menu entry, and visible batch progress
 
-## What it can do
+## Why use it
 
-- Export `STL`, `OBJ`, `3MF`, `F3D`, `IGES`, `SAT`, `SMT`, `STEP`, and `USDZ` from one command instead of bouncing between separate Fusion export flows
-- Export multiple output types in a single pass when you need more than one format from the same design
-- Remember the settings and folders you actually use, so repeat exports take much less setup
-- Let you choose between a simple direct-export workflow and an automatic sort-and-organize workflow
-- Keep per-project behavior where it matters, like normal export folders and whether a given file should auto-sort
-- Choose whether to export the full design, only currently visible bodies, or a specific selection
-- Support either one shared settings block or separate settings per format, depending on how much control you want
-- Send a single mesh export straight to Fusion's print-utility handoff when you want to jump directly into a slicer
-- Optionally open the export destination folder automatically after a successful export
-- Keep mesh formats front and center while tucking CAD / Solids formats into a separate section
-- Fit into Fusion more naturally with a toolbar button, Browser context-menu entry, and visible export progress while the batch runs
+Fusion’s built-in export tools work, but repeated exports can get repetitive quickly. Common tasks often involve:
+
+- choosing the same output formats again and again
+- re-entering the same folders
+- exporting one format at a time
+- manually cleaning up the resulting files afterward
+
+Better Export is built to reduce that friction and make repeated export workflows feel faster and more predictable.
 
 ## Export sorting
 
-If you choose `Sort Into Project Folders`, Better Export will:
+If you choose **Sort Into Project Folders**, Better Export will:
 
 1. Export files into a temporary staging folder
-2. Process the exported files immediately after the batch finishes
+2. Process them immediately after the batch finishes
 3. Move the cleaned results into your chosen output folder
 
-The sorter currently handles:
+The sorter currently supports:
 
 - `.stl`
 - `.3mf`
@@ -45,33 +48,27 @@ The sorter currently handles:
 - `.mtl`
 - `.f3d`
 - `.iges`
-- `.igs`
 - `.sat`
 - `.smt`
 - `.step`
-- `.stp`
 - `.usdz`
 
-The sorting pass can:
+During sorting, Better Export can:
 
-- dedupe mesh exports by version
-- strip version markers and spaces from final filenames
+- deduplicate mesh exports by version
+- remove version markers and spaces from final filenames
 - keep OBJ and MTL files linked correctly after renaming
 - archive original F3D files
 - create one cleaned top-level F3D copy for the highest-version file
-- organize outputs into per-project folders and type-specific subfolders
+- organize exports into project folders with type-specific subfolders
 
-There is also a `Replace Existing Sorted Files` option for cases where you want sorted outputs to replace existing files.
+There is also a **Replace Existing Sorted Files** option for workflows where sorted outputs should overwrite older sorted files. If you prefer to keep Fusion’s version markers in the filenames, you can disable **Strip Version Numbers From Sorted Filenames**. Better Export will still use the cleaned base name for the project folder while allowing the sorted file itself to keep its versioned name.
 
-If you prefer to keep Fusion's version markers in the files themselves, you can turn off `Strip Version Numbers From Sorted Filenames`. Better Export will still use the cleaned base name for the project folder, so `DeskClip v2.stl` still lands under `DeskClip`, but the sorted file can keep its versioned filename.
-
-If you want a faster handoff into the rest of your workflow, Better Export can also open the destination folder automatically after a successful export.
-
-One nice side effect of auto-sort is that it plays well with the `Reload from disk` feature in many 3D printer slicers. Because the add-in keeps writing cleaned files back to stable project folders, you can often refresh an existing model in the slicer in place instead of dragging a new copy in every time you export an updated version from Fusion.
+A useful side effect of auto-sort is that it works well with **Reload from disk** workflows in many slicers. Because Better Export writes cleaned files back to stable project folders, you can often refresh an existing model in place instead of re-importing it every time.
 
 ## Example sorted output
 
-If `Sorted Projects Folder` is set to `~/Documents/Fusion Exports`, the add-in might create a structure like this after an auto-sorted export:
+If **Sorted Projects Folder** is set to `~/Documents/Fusion Exports`, Better Export might create a structure like this:
 
 ```text
 ~/Documents/Fusion Exports/
@@ -95,57 +92,72 @@ If `Sorted Projects Folder` is set to `~/Documents/Fusion Exports`, the add-in m
     └── STL/
         └── LampArmBracket_45deg.stl
 ```
-
-A few things to notice:
+In this structure:
 
 - project folders are created from the cleaned filename prefix before the first underscore
-- exported files are sorted into type-specific folders like `STL`, `3MF`, `OBJ`, `STEP`, or `USDZ`
-- `.mtl` files are kept beside their matching `.obj`
+- files are organized into type-specific folders such as `STL`, `3MF`, `OBJ`, `STEP`, and `USDZ`
+- `.mtl` files stay beside their matching `.obj`
 - original `.f3d` files are archived in `F3D`
 - the highest-version `.f3d` also gets one cleaned top-level copy in the project folder
 
-## Install
+## Installation
 
-The easiest way to install it is:
+### Option 1: Install from inside Fusion
 
-1. Download the latest zip from the GitHub releases page.
-2. Unzip it.
-3. In Fusion, open `Utilities > Scripts and Add-Ins`.
-4. Go to the `Add-Ins` tab.
-5. Click the green `+` button.
-6. Select the unzipped `BetterExport` folder.
-7. Run the add-in.
+1. Download the latest release ZIP from the GitHub Releases page
+2. Unzip it
+3. In Fusion, open **Utilities > Scripts and Add-Ins**
+4. Open the **Add-Ins** tab
+5. Click the green `+` button
+6. Select the unzipped `BetterExport` folder
+7. Run the add-in
 
-The release zip also includes a `HOW TO INSTALL.txt` file with the default add-in locations for macOS and Windows if you prefer to install it by copying the folder into Fusion's Add-Ins directory yourself.
+### Option 2: Copy into Fusion’s Add-Ins folder
 
-## Where it shows up in Fusion
+**macOS default Add-Ins folder**  
+`~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/`
 
-When Fusion exposes the `Utilities` tab in the current workspace, the add-in adds a `Better Export` button there.
+**Windows default Add-Ins folder**  
+`%AppData%\Autodesk\Autodesk Fusion 360\API\AddIns\`
 
-It also adds `Better Export` to the Browser right-click menu for exportable items like:
+To install by copy:
+
+1. Download and unzip the release package
+2. Copy the `BetterExport` folder into your platform’s Add-Ins folder
+3. Open Autodesk Fusion
+4. Go to **Utilities > Scripts and Add-Ins**
+5. Open the **Add-Ins** tab
+6. Find **Better Export** and run it
+
+## Where it appears in Fusion
+
+When Fusion exposes the **Utilities** tab in the current workspace, Better Export adds a **Better Export** button there.
+
+It also adds **Better Export** to the Browser right-click menu for exportable items such as:
 
 - components
 - occurrences
 - bodies
 
-If nothing is selected, the add-in exports the active root component.
+## Notes
 
-## A few notes
+- Settings are stored locally in `BetterExport/settings.json`
+- Most preferences save as soon as they are changed, even if the dialog is closed without exporting
+- `File Name` is intentionally not persisted and refreshes from the active Fusion document each time the dialog opens
+- The `Target` control lets you export only currently visible bodies or a specific selection
+- Some options appear only when the installed Fusion version exposes the required API support
 
-- Settings are stored locally in `BetterExport/settings.json`.
-- Most preferences save as soon as you change them, even if you close the dialog without exporting.
-- `File Name` is intentionally not persisted. It refreshes from the active Fusion document each time the dialog opens.
-- The `Target` control lets you export the full design, only currently visible bodies, or a specific selection. `Export Full Design` temporarily exports from the root component and then restores the previous view state afterward.
-- The add-in can let you know when a newer release is available, and you can also stage an update from inside Fusion when a new release is ready.
-- Fusion's API support varies a bit by version, so some options are shown only when your installed Fusion build exposes them.
+## Update checks
 
-## Project files
+Better Export can let you know when a newer release is available, and it can also stage an update from inside Fusion when a new release is ready.
 
-- `BetterExport/BetterExport.py` contains the add-in itself
-- `BetterExport/export_sorter.py` contains the post-export sorting logic
-- `BetterExport/BetterExport.manifest` is the Fusion add-in manifest
-- `BetterExport/HOW TO INSTALL.txt` is the packaged quick-install guide
+## Project structure
+
+- `BetterExport/BetterExport.py` — main add-in logic
+- `BetterExport/export_sorter.py` — post-export sorting logic
+- `BetterExport/BetterExport.manifest` — Fusion add-in manifest
+- `BetterExport/HOW TO INSTALL.txt` — packaged quick-install guide
 
 ## Status
 
-This project is working and installable today, but I still think of it as something that can keep getting nicer over time. If you spot missing Fusion options, rough edges in the UI, or export cases that should be handled better, those are all fair game for future updates.
+Better Export is ready to use today and is intended to be practical for real day-to-day export workflows. Future updates may expand format coverage, improve UI details, and support additional Fusion export behaviors as Autodesk’s API allows. This project is already useful now, with room to keep improving over time.
