@@ -161,3 +161,7 @@ Better Export can let you know when a newer release is available, and it can als
 ## Status
 
 Better Export is ready to use today and is intended to be practical for real day-to-day export workflows. Future updates may expand format coverage, improve UI details, and support additional Fusion export behaviors as Autodesk’s API allows. This project is already useful now, with room to keep improving over time.
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE` for details.
