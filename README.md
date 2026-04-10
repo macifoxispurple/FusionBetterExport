@@ -32,6 +32,10 @@ Fusion’s built-in export tools work, but repeated exports can get repetitive q
 
 Better Export is built to reduce that friction and make repeated export workflows feel faster and more predictable.
 
+## A note about F3Z
+
+Fusion’s native `F3Z` export is a special cloud-backed package for designs with external references. Better Export currently leaves that workflow to Fusion’s built-in export command so Autodesk can generate the full reference package correctly.
+
 ## Export sorting
 
 If you choose **Sort Into Project Folders**, Better Export will:
