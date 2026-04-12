@@ -1,4 +1,5 @@
 import json
+import html
 import importlib
 import importlib.util
 import os
@@ -49,6 +50,8 @@ from update_state import (
 COMMAND_ID = 'betterMeshExportCommand'
 COMMAND_NAME = 'Better Export'
 COMMAND_DESCRIPTION = 'Export mesh and CAD formats from Fusion with persistent settings.'
+BATCH_COMMAND_NAME = 'Batch Export Folder'
+BATCH_EXPORT_EVENT_ID = 'betterExportBatchFolderEvent'
 WORKSPACE_ID = 'FusionSolidEnvironment'
 FALLBACK_PANEL_ID = 'SolidScriptsAddinsPanel'
 UTILITIES_PANEL_ID = 'BetterExportPanel'
@@ -107,9 +110,11 @@ SETTINGS_MODE_LABELS = {
 
 TARGET_MODE_LABELS = {
     'full_design': 'Export Full Design',
+    'project_folder': 'Export Project Folder',
     'visible_bodies': 'Export Only Visible Bodies',
     'selection': 'Export Selection'
 }
+TARGET_MODE_DIVIDER_LABEL = '────────'
 
 DESTINATION_MODE_LABELS = {
     'direct': 'Direct Export',
@@ -144,8 +149,10 @@ GENERAL_DEFAULTS = {
     'allow_overwrite': True,
     'strip_version_numbers': True,
     'open_folder_after_export': True,
+    'move_timeline_to_end': False,
     'mesh_group_expanded': True,
     'cad_group_expanded': False,
+    'batch_include_subfolders': False,
     'non_print_formats': ['stl'],
     'project_export_folders': {},
     'project_auto_sort_preferences': {},
@@ -170,6 +177,7 @@ _updated_runtime_module = None
 _ui_sync_in_progress = False
 _format_sync_in_progress = False
 _ignored_format_uncheck_events = set()
+_batch_export_request = None
 
 
 def _open_folder_in_system(path_value):
@@ -383,6 +391,8 @@ def _normalized_update_check(value):
         normalized['latest_asset_url'] = value['latest_asset_url'].strip()
     if isinstance(value.get('latest_asset_name'), str):
         normalized['latest_asset_name'] = value['latest_asset_name'].strip()
+    if isinstance(value.get('latest_notes'), str):
+        normalized['latest_notes'] = value['latest_notes'].strip()
     if isinstance(value.get('error'), str):
         normalized['error'] = value['error'].strip()
     return normalized
@@ -415,6 +425,166 @@ def _current_project_key():
     stem = os.path.splitext(document_name)[0]
     key = VERSION_TOKEN_RE.sub(lambda match: match.group(1), stem).strip()
     return key or _sanitize_filename(stem)
+
+
+def _active_data_folder():
+    data = _safe_call(lambda: _app.data)
+    folder = _safe_call(lambda d=data: d.activeFolder) if data else None
+    if folder:
+        return folder
+
+    design = _active_design()
+    data_file = _safe_call(lambda: design.parentDocument.dataFile) if design and design.parentDocument else None
+    return _safe_call(lambda: data_file.parentFolder) if data_file else None
+
+
+def _document_data_file_key(document):
+    if not document:
+        return ''
+    data_file = _safe_call(lambda doc=document: doc.dataFile)
+    if not data_file:
+        design = _safe_call(lambda doc=document: doc.products.itemByProductType('DesignProductType'))
+        parent_document = _safe_call(lambda prod=design: prod.parentDocument) if design else None
+        data_file = _safe_call(lambda parent=parent_document: parent.dataFile) if parent_document else None
+    if not data_file:
+        return ''
+    key = _safe_call(lambda df=data_file: df.id) or _safe_call(lambda df=data_file: df.versionId)
+    return str(key or '').strip()
+
+
+def _snapshot_open_documents():
+    documents = _safe_call(lambda: _app.documents)
+    if not documents:
+        return []
+    count = _safe_call(lambda docs=documents: docs.count) or 0
+    snapshot = []
+    for index in range(count):
+        document = _safe_call(lambda docs=documents, i=index: docs.item(i))
+        if document:
+            snapshot.append(document)
+    return snapshot
+
+
+def _is_preexisting_document(document, preexisting_documents, starting_document):
+    if not document:
+        return False
+    if starting_document and document == starting_document:
+        return True
+
+    document_key = _document_data_file_key(document)
+    for existing_document in preexisting_documents:
+        if existing_document and document == existing_document:
+            return True
+        existing_key = _document_data_file_key(existing_document)
+        if document_key and existing_key and document_key == existing_key:
+            return True
+    return False
+
+
+def _data_folder_display_name(folder):
+    if not folder:
+        return 'No active Fusion project folder'
+
+    names = []
+    current = folder
+    while current:
+        name = (_safe_call(lambda f=current: f.name) or '').strip()
+        if name:
+            names.append(name)
+        current = _safe_call(lambda f=current: f.parentFolder)
+
+    project_name = (_safe_call(lambda f=folder: f.parentProject.name) or '').strip()
+    path_text = ' / '.join(reversed(names)) if names else 'Folder'
+    return '{} / {}'.format(project_name, path_text) if project_name else path_text
+
+
+def _is_design_data_file(data_file):
+    extension = (_safe_call(lambda df=data_file: df.fileExtension) or '').strip().lower()
+    if extension == 'f3d':
+        return True
+
+    name = (_safe_call(lambda df=data_file: df.name) or '').strip().lower()
+    return name.endswith('.f3d')
+
+
+def _collect_batch_data_files(folder, include_subfolders=False):
+    collected = []
+    if not folder:
+        return collected
+
+    data_files = _safe_call(lambda f=folder: f.dataFiles)
+    file_count = _safe_call(lambda: data_files.count) or 0
+    for index in range(file_count):
+        data_file = _safe_call(lambda i=index: data_files.item(i))
+        if data_file and _is_design_data_file(data_file):
+            collected.append(data_file)
+
+    if include_subfolders:
+        data_folders = _safe_call(lambda f=folder: f.dataFolders)
+        folder_count = _safe_call(lambda: data_folders.count) or 0
+        for index in range(folder_count):
+            child_folder = _safe_call(lambda i=index: data_folders.item(i))
+            collected.extend(_collect_batch_data_files(child_folder, True))
+
+    collected.sort(key=lambda data_file: ((_safe_call(lambda df=data_file: df.name) or '').lower()))
+    return collected
+
+
+def _refresh_batch_folder_cache(inputs):
+    folder = _active_data_folder()
+    include_subfolders = bool(_read_bool_input(inputs, 'batch_include_subfolders'))
+    matching_files = _collect_batch_data_files(folder, include_subfolders)
+
+    folder_value = adsk.core.StringValueCommandInput.cast(inputs.itemById('batch_source_folder_value'))
+    count_value = adsk.core.StringValueCommandInput.cast(inputs.itemById('batch_source_count_value'))
+    folder_summary = adsk.core.TextBoxCommandInput.cast(inputs.itemById('batch_source_folder'))
+    count_summary = adsk.core.TextBoxCommandInput.cast(inputs.itemById('batch_source_count'))
+
+    folder_text = _data_folder_display_name(folder)
+    count_text = '{} design file{}'.format(len(matching_files), '' if len(matching_files) == 1 else 's')
+
+    if folder_value:
+        folder_value.value = folder_text
+    if count_value:
+        count_value.value = str(len(matching_files))
+    if folder_summary:
+        folder_summary.formattedText = folder_text
+        folder_summary.tooltip = folder_text
+    if count_summary:
+        count_summary.formattedText = count_text
+
+
+def _set_batch_folder_pending_state(inputs, message='Refreshing active folder…'):
+    folder = _active_data_folder()
+    folder_value = adsk.core.StringValueCommandInput.cast(inputs.itemById('batch_source_folder_value'))
+    count_value = adsk.core.StringValueCommandInput.cast(inputs.itemById('batch_source_count_value'))
+    folder_summary = adsk.core.TextBoxCommandInput.cast(inputs.itemById('batch_source_folder'))
+    count_summary = adsk.core.TextBoxCommandInput.cast(inputs.itemById('batch_source_count'))
+
+    folder_text = _data_folder_display_name(folder)
+    if folder_value:
+        folder_value.value = folder_text
+    if count_value:
+        count_value.value = 'pending'
+    if folder_summary:
+        folder_summary.formattedText = folder_text
+        folder_summary.tooltip = folder_text
+    if count_summary:
+        count_summary.formattedText = message
+
+
+def _is_batch_folder_refresh_pending(inputs):
+    count_value = adsk.core.StringValueCommandInput.cast(inputs.itemById('batch_source_count_value'))
+    raw_value = (count_value.value or '').strip().lower() if count_value else ''
+    return raw_value == 'pending'
+
+
+def _cached_batch_file_count(inputs):
+    count_value = adsk.core.StringValueCommandInput.cast(inputs.itemById('batch_source_count_value'))
+    try:
+        return int((count_value.value or '').strip()) if count_value else 0
+    except Exception:
+        return 0
 
 
 def _folder_for_current_project(settings):
@@ -514,6 +684,275 @@ def _sorted_project_folder_for_settings(settings):
     return settings.get('sorted_output_folder', '')
 
 
+def _capture_design_view_state(design):
+    root_component = _root_component()
+    if not design or not root_component:
+        return None
+
+    saved_state = _collect_full_root_state(root_component)
+    saved_state['active_occurrence'] = _safe_call(lambda: design.activeOccurrence)
+    return saved_state
+
+
+def _apply_full_root_export_state(design, saved_state):
+    if not design or not saved_state:
+        return
+
+    try:
+        design.activateRootComponent()
+    except Exception:
+        pass
+
+    for occurrence, _, _ in saved_state.get('occurrences', []):
+        try:
+            occurrence.isIsolated = False
+        except Exception:
+            pass
+        try:
+            occurrence.isLightBulbOn = True
+        except Exception:
+            pass
+
+    for body, _ in saved_state.get('bodies', []):
+        try:
+            body.isLightBulbOn = True
+        except Exception:
+            pass
+
+
+def _apply_visible_bodies_export_state(design, saved_state):
+    if not design or not saved_state:
+        return
+
+    try:
+        design.activateRootComponent()
+    except Exception:
+        pass
+
+
+def _prepare_timeline_state_for_export(design, enabled):
+    if not enabled or not design:
+        return None
+
+    timeline = _safe_call(lambda: design.timeline)
+    if not timeline:
+        return None
+
+    original_marker_position = _safe_call(lambda: timeline.markerPosition)
+    try:
+        timeline.moveToEnd()
+        adsk.doEvents()
+        return {
+            'timeline': timeline,
+            'marker_position': original_marker_position
+        }
+    except Exception:
+        return None
+
+
+def _restore_timeline_state(timeline_state):
+    if not timeline_state:
+        return
+
+    timeline = timeline_state.get('timeline')
+    marker_position = timeline_state.get('marker_position')
+    if not timeline or marker_position is None:
+        return
+
+    try:
+        timeline.markerPosition = marker_position
+        adsk.doEvents()
+    except Exception:
+        pass
+
+
+def _execute_exports(settings, geometry, target_mode, show_progress=True, persist_settings=True, force_default_filenames=False, raise_on_error=False):
+    progress_dialog = None
+    export_succeeded = False
+    export_cancelled = False
+    open_after_export = False
+    reveal_path = ''
+    temp_staging_dir = None
+    restore_view_state = None
+    export_view_state = None
+    timeline_state = None
+    design = None
+    try:
+        open_after_export = bool(settings.get('open_folder_after_export', True))
+        if any(_settings_for_format(settings, format_key).get('send_to_print_utility') for format_key in settings['formats']):
+            open_after_export = False
+
+        design = _active_design()
+        if not design:
+            raise ValueError('Open a Fusion design before exporting.')
+
+        if settings.get('move_timeline_to_end') and target_mode in ('full_design', 'visible_bodies'):
+            restore_view_state = _capture_design_view_state(design)
+        timeline_state = _prepare_timeline_state_for_export(design, bool(settings.get('move_timeline_to_end')))
+
+        if target_mode == 'full_design':
+            export_view_state = _capture_design_view_state(design)
+            _apply_full_root_export_state(design, export_view_state)
+        elif target_mode == 'visible_bodies':
+            export_view_state = _capture_design_view_state(design)
+            _apply_visible_bodies_export_state(design, export_view_state)
+
+        if restore_view_state is None:
+            restore_view_state = export_view_state
+
+        total_exports = len(settings['formats'])
+        if show_progress and _ui:
+            progress_dialog = _ui.createProgressDialog()
+            progress_dialog.cancelButtonText = ''
+            progress_dialog.isCancelButtonShown = False
+            progress_dialog.show(
+                'Better Export',
+                'Preparing exports...',
+                0,
+                max(1, total_exports),
+                0
+            )
+
+        for index, format_key in enumerate(settings['formats'], start=1):
+            format_settings = _settings_for_format(settings, format_key)
+            resolved_filename = _default_filename() if force_default_filenames else (format_settings['filename'] or _default_filename())
+            format_settings['filename'] = _sanitize_filename(resolved_filename)
+            if settings['settings_mode'] == 'global':
+                settings['filename'] = format_settings['filename']
+            else:
+                settings['per_format_settings'][format_key]['filename'] = format_settings['filename']
+
+            export_path = ''
+            if not format_settings['send_to_print_utility']:
+                export_folder = settings['folder']
+                if settings['auto_sort_after_export']:
+                    if temp_staging_dir is None:
+                        temp_staging_dir = tempfile.mkdtemp(prefix='better-export-')
+                    export_folder = temp_staging_dir
+                os.makedirs(export_folder, exist_ok=True)
+                export_path = os.path.join(
+                    export_folder,
+                    '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
+                )
+            elif format_key == 'obj':
+                if temp_staging_dir is None:
+                    temp_staging_dir = tempfile.mkdtemp(prefix='better-export-')
+                export_path = os.path.join(
+                    temp_staging_dir,
+                    '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
+                )
+
+            format_geometry = _geometry_for_format(format_key, geometry)
+            if not format_geometry:
+                raise ValueError('Fusion could not resolve valid geometry for the {} export.'.format(FORMAT_LABELS[format_key]))
+
+            if progress_dialog:
+                progress_dialog.progressValue = index - 1
+                progress_dialog.message = 'Exporting {} ({} of {})...'.format(
+                    FORMAT_LABELS[format_key],
+                    index,
+                    total_exports
+                )
+
+            if format_key == 'smt':
+                success = _export_sat_or_smt_with_temporary_brep(format_key, format_geometry, export_path)
+            else:
+                options = _create_export_options(format_key, format_geometry, export_path)
+                _apply_options_from_settings(format_key, options, format_settings)
+                success = design.exportManager.execute(options)
+            if not success:
+                raise RuntimeError('Fusion reported that the {} export did not complete.'.format(FORMAT_LABELS[format_key]))
+
+            if format_key == '3mf' and target_mode == 'visible_bodies' and export_path:
+                _remove_empty_visible_body_3mf_outputs(
+                    os.path.dirname(export_path),
+                    format_settings['filename']
+                )
+
+            if progress_dialog:
+                progress_dialog.progressValue = index
+
+        if settings['auto_sort_after_export']:
+            if progress_dialog:
+                progress_dialog.message = 'Sorting exported files...'
+                adsk.doEvents()
+            conflict_resolver = None
+            if not settings['allow_overwrite']:
+                scanned_conflicts = scan_export_conflicts(
+                    temp_staging_dir,
+                    settings['sorted_output_folder'],
+                    strip_version_numbers=settings.get('strip_version_numbers', True)
+                )
+                if scanned_conflicts:
+                    conflict_action = _choose_sort_conflict_action(scanned_conflicts)
+                    if conflict_action == 'skip':
+                        export_cancelled = True
+                    conflict_resolver = (lambda source, target, operation, keep_both_target, action=conflict_action: action)
+                else:
+                    def _tracking_single_conflict_resolver(source, target, operation, keep_both_target):
+                        nonlocal export_cancelled
+                        action = _choose_single_sort_conflict_action(source, target, operation, keep_both_target)
+                        if action == 'skip':
+                            export_cancelled = True
+                        return action
+                    conflict_resolver = _tracking_single_conflict_resolver
+            sort_result = process_exports(
+                temp_staging_dir,
+                settings['sorted_output_folder'],
+                allow_overwrite=settings['allow_overwrite'],
+                conflict_resolver=conflict_resolver,
+                strip_version_numbers=settings.get('strip_version_numbers', True)
+            )
+            if sort_result.get('conflicts_skipped'):
+                export_cancelled = True
+
+        if persist_settings:
+            _save_settings(settings)
+        reveal_path = _sorted_project_folder_for_settings(settings) if settings['auto_sort_after_export'] else settings['folder']
+        export_succeeded = True
+        return {
+            'succeeded': True,
+            'cancelled': export_cancelled,
+            'reveal_path': reveal_path,
+            'open_after_export': open_after_export and not export_cancelled
+        }
+    except Exception as exc:
+        if raise_on_error:
+            raise
+        _show_error(str(exc))
+        return {
+            'succeeded': False,
+            'cancelled': False,
+            'reveal_path': '',
+            'open_after_export': False
+        }
+    finally:
+        if progress_dialog:
+            try:
+                if export_succeeded:
+                    progress_dialog.progressValue = len(settings['formats']) if 'settings' in locals() else progress_dialog.progressValue
+                    progress_dialog.message = 'Export cancelled.' if export_cancelled else 'Export successful.'
+                    adsk.doEvents()
+                    time.sleep(1)
+                progress_dialog.hide()
+            except Exception:
+                pass
+        if temp_staging_dir and os.path.isdir(temp_staging_dir):
+            try:
+                shutil.rmtree(temp_staging_dir)
+            except Exception:
+                pass
+        if timeline_state:
+            _restore_timeline_state(timeline_state)
+        if restore_view_state:
+            _restore_full_root_state(design or _active_design(), restore_view_state)
+        if export_succeeded and not export_cancelled and open_after_export:
+            try:
+                _open_folder_in_system(reveal_path)
+            except Exception:
+                pass
+
+
 def _current_addin_version():
     try:
         with open(MANIFEST_PATH, 'r', encoding='utf-8') as handle:
@@ -562,6 +1001,25 @@ def _release_zip_asset(payload):
     return zip_assets[0] if zip_assets else {}
 
 
+def _normalized_release_notes(body_text):
+    text = str(body_text or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+    if not text:
+        return ''
+    lines = [line.rstrip() for line in text.split('\n')]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return '\n'.join(lines).strip()
+
+
+def _release_notes_html(notes_text):
+    text = _normalized_release_notes(notes_text)
+    if not text:
+        return ''
+    return '<br/>'.join(html.escape(line) if line.strip() else '' for line in text.split('\n'))
+
+
 def _fetch_latest_release_info():
     request = urllib.request.Request(
         LATEST_RELEASE_API_URL,
@@ -582,6 +1040,7 @@ def _fetch_latest_release_info():
     asset = _release_zip_asset(payload)
     latest_asset_url = str(asset.get('browser_download_url') or '').strip()
     latest_asset_name = str(asset.get('name') or '').strip()
+    latest_notes = _normalized_release_notes(payload.get('body') or '')
     if not latest_version:
         raise ValueError('GitHub did not return a release version.')
 
@@ -591,6 +1050,7 @@ def _fetch_latest_release_info():
         'latest_url': latest_url,
         'latest_asset_url': latest_asset_url,
         'latest_asset_name': latest_asset_name,
+        'latest_notes': latest_notes,
         'error': ''
     }
 
@@ -618,6 +1078,7 @@ def _latest_release_info(force_refresh=False, allow_cached_on_error=True):
             'latest_url': LATEST_RELEASE_PAGE_URL,
             'latest_asset_url': '',
             'latest_asset_name': '',
+            'latest_notes': '',
             'error': str(exc)
         }
 
@@ -722,6 +1183,24 @@ def _write_current_update_state(state):
     return write_update_state(UPDATE_STATE_PATH, state)
 
 
+def _transition_staged_update_to_failed(update_state, message):
+    failure_state = fail_update_state(update_state, str(message or '').strip())
+    _write_current_update_state(failure_state)
+    try:
+        _set_run_on_startup(startup_preference_after_apply(update_state))
+    except Exception:
+        pass
+    try:
+        _set_manifest_version(update_state.get('installed_version') or _current_addin_version())
+    except Exception:
+        pass
+    try:
+        shutil.rmtree(PENDING_UPDATE_DIR, ignore_errors=True)
+    except Exception:
+        pass
+    return failure_state
+
+
 def _stage_update_payload(release_info):
     current_version = _current_addin_version()
     latest_version = release_info.get('latest_version', '')
@@ -749,19 +1228,34 @@ def _stage_update_payload(release_info):
     _write_update_helper()
     script_item = _script_item_for_addin()
     previous_run_on_startup = bool(_safe_call(lambda: script_item.isRunOnStartup)) if script_item else False
-    _set_run_on_startup(True)
-    _set_manifest_version(latest_version)
-
     update_info = stage_update_state(
         latest_version,
         current_version,
         extracted_addin_dir,
         previous_run_on_startup
     )
-    with open(PENDING_UPDATE_INFO_PATH, 'w', encoding='utf-8') as handle:
-        json.dump(update_info, handle, indent=2, sort_keys=True)
-    _write_current_update_state(update_info)
-    return update_info
+
+    try:
+        _set_run_on_startup(True)
+        _set_manifest_version(latest_version)
+        with open(PENDING_UPDATE_INFO_PATH, 'w', encoding='utf-8') as handle:
+            json.dump(update_info, handle, indent=2, sort_keys=True)
+        _write_current_update_state(update_info)
+        return update_info
+    except Exception:
+        try:
+            _set_run_on_startup(previous_run_on_startup)
+        except Exception:
+            pass
+        try:
+            _set_manifest_version(current_version)
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(PENDING_UPDATE_DIR, ignore_errors=True)
+        except Exception:
+            pass
+        raise
 
 
 def _apply_pending_update_if_needed():
@@ -769,7 +1263,9 @@ def _apply_pending_update_if_needed():
     if update_state.get('state') != STATE_STAGED:
         return None
     if not os.path.exists(PENDING_UPDATE_INFO_PATH) or not os.path.exists(UPDATE_HELPER_PATH):
-        return None
+        message = 'The staged update files are missing.'
+        _transition_staged_update_to_failed(update_state, message)
+        return {'status': 'failed', 'latest_version': '', 'error': message}
 
     try:
         with open(PENDING_UPDATE_INFO_PATH, 'r', encoding='utf-8') as handle:
@@ -799,20 +1295,7 @@ def _apply_pending_update_if_needed():
         _write_current_update_state(applied_state)
         return {'status': 'applied', 'latest_version': latest_version or _current_addin_version(), 'error': ''}
     except Exception as exc:
-        failure_state = fail_update_state(update_state, str(exc))
-        _write_current_update_state(failure_state)
-        try:
-            _set_run_on_startup(startup_preference_after_apply(update_state))
-        except Exception:
-            pass
-        try:
-            _set_manifest_version(update_state.get('installed_version') or _current_addin_version())
-        except Exception:
-            pass
-        try:
-            shutil.rmtree(PENDING_UPDATE_DIR, ignore_errors=True)
-        except Exception:
-            pass
+        _transition_staged_update_to_failed(update_state, str(exc))
         return {'status': 'failed', 'latest_version': '', 'error': str(exc)}
 
 
@@ -902,6 +1385,11 @@ def _target_mode_from_inputs(inputs):
     for key, label in TARGET_MODE_LABELS.items():
         if raw_value == label:
             return key
+    if raw_value == TARGET_MODE_DIVIDER_LABEL:
+        previous_mode_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('last_target_mode'))
+        previous_mode = (previous_mode_input.value or '').strip() if previous_mode_input else ''
+        if previous_mode in TARGET_MODE_LABELS:
+            return previous_mode
     full_root_enabled = _read_bool_input(inputs, 'always_export_full_root')
     return 'full_design' if full_root_enabled else 'selection'
 
@@ -911,6 +1399,10 @@ def _destination_mode_from_inputs(inputs):
     for key, label in DESTINATION_MODE_LABELS.items():
         if raw_value == label:
             return key
+    last_mode_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('last_destination_mode'))
+    last_mode_value = (last_mode_input.value or '').strip() if last_mode_input else ''
+    if last_mode_value in DESTINATION_MODE_LABELS:
+        return last_mode_value
     auto_sort_enabled = _read_bool_input(inputs, 'auto_sort_after_export')
     return 'sorted' if auto_sort_enabled else 'direct'
 
@@ -976,6 +1468,8 @@ def _read_general_settings(inputs):
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
     strip_version_numbers = _read_bool_input(inputs, 'strip_version_numbers')
     open_folder_after_export = _read_bool_input(inputs, 'open_folder_after_export')
+    move_timeline_to_end = _read_bool_input(inputs, 'move_timeline_to_end')
+    batch_include_subfolders = _read_bool_input(inputs, 'batch_include_subfolders')
     customize_per_format = _read_bool_input(inputs, 'customize_per_format')
     f3d_enabled_preference = _read_bool_input(inputs, 'f3d_enabled_preference')
     mesh_group_input = adsk.core.GroupCommandInput.cast(inputs.itemById('mesh_format_group'))
@@ -991,6 +1485,7 @@ def _read_general_settings(inputs):
         allow_overwrite,
         strip_version_numbers,
         open_folder_after_export,
+        move_timeline_to_end,
         customize_per_format,
         f3d_enabled_preference
     ):
@@ -1008,6 +1503,8 @@ def _read_general_settings(inputs):
         'allow_overwrite': allow_overwrite,
         'strip_version_numbers': strip_version_numbers,
         'open_folder_after_export': open_folder_after_export,
+        'move_timeline_to_end': move_timeline_to_end,
+        'batch_include_subfolders': batch_include_subfolders,
         'mesh_group_expanded': mesh_group_expanded,
         'cad_group_expanded': cad_group_expanded,
         'settings_mode': 'per_format' if customize_per_format else 'global'
@@ -1221,50 +1718,14 @@ def _restore_full_root_state(design, saved_state):
 
 
 def _prepare_full_root_export(design):
-    root_component = _root_component()
-    if not design or not root_component:
-        return None
-
-    saved_state = _collect_full_root_state(root_component)
-    saved_state['active_occurrence'] = _safe_call(lambda: design.activeOccurrence)
-
-    try:
-        design.activateRootComponent()
-    except Exception:
-        pass
-
-    for occurrence, _, _ in saved_state.get('occurrences', []):
-        try:
-            occurrence.isIsolated = False
-        except Exception:
-            pass
-        try:
-            occurrence.isLightBulbOn = True
-        except Exception:
-            pass
-
-    for body, _ in saved_state.get('bodies', []):
-        try:
-            body.isLightBulbOn = True
-        except Exception:
-            pass
-
+    saved_state = _capture_design_view_state(design)
+    _apply_full_root_export_state(design, saved_state)
     return saved_state
 
 
 def _prepare_visible_bodies_export(design):
-    root_component = _root_component()
-    if not design or not root_component:
-        return None
-
-    saved_state = _collect_full_root_state(root_component)
-    saved_state['active_occurrence'] = _safe_call(lambda: design.activeOccurrence)
-
-    try:
-        design.activateRootComponent()
-    except Exception:
-        pass
-
+    saved_state = _capture_design_view_state(design)
+    _apply_visible_bodies_export_state(design, saved_state)
     return saved_state
 
 
@@ -1563,6 +2024,40 @@ def _dropdown_selected_label(dropdown):
     return ''
 
 
+def _select_dropdown_label(dropdown, label):
+    if not dropdown:
+        return False
+    try:
+        list_items = dropdown.listItems
+        for index in range(list_items.count):
+            item = list_items.item(index)
+            if item and item.name == label:
+                item.isSelected = True
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _sync_destination_mode_dropdown(dropdown, selected_mode, project_folder_mode):
+    if not dropdown:
+        return selected_mode
+
+    allowed_modes = ['direct', 'sorted'] if project_folder_mode else ['direct', 'sorted', 'print_utility']
+    if selected_mode not in allowed_modes:
+        selected_mode = 'sorted' if project_folder_mode else 'direct'
+
+    try:
+        list_items = dropdown.listItems
+        list_items.clear()
+        for mode in allowed_modes:
+            list_items.add(DESTINATION_MODE_LABELS[mode], mode == selected_mode, '')
+    except Exception:
+        pass
+
+    return selected_mode
+
+
 def _selected_key(inputs, input_id):
     raw_value = _dropdown_value(inputs, input_id)
 
@@ -1699,6 +2194,7 @@ def _current_settings_from_inputs(inputs):
 
 def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities, group_visible, auto_sort_enabled, print_destination_mode=False):
     group_input = adsk.core.GroupCommandInput.cast(command_inputs.itemById(_group_input_id(scope_key)))
+    filename_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'filename')))
     refinement_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'mesh_refinement')))
     binary_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'binary_format')))
     one_per_body_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById(_option_input_id(scope_key, 'one_file_per_body')))
@@ -1725,7 +2221,10 @@ def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities
     if not group_visible:
         return
 
+    batch_project_mode = _target_mode_from_inputs(command_inputs) == 'project_folder'
     refinement_input.isVisible = capabilities['mesh_refinement']
+    if filename_input:
+        filename_input.isVisible = not batch_project_mode
     binary_input.isVisible = capabilities['binary_format']
     one_per_body_input.isVisible = capabilities['one_file_per_body'] and not print_destination_mode
     unit_input.isVisible = capabilities['unit_type']
@@ -1759,7 +2258,7 @@ def _sync_option_scope_ui(command_inputs, scope_key, option_values, capabilities
 
 
 def _sync_ui(command_inputs):
-    global _format_sync_in_progress, _ignored_format_uncheck_events
+    global _ui_sync_in_progress, _format_sync_in_progress, _ignored_format_uncheck_events
     settings = _merge_settings(_current_settings_from_inputs(command_inputs))
     geometry = _target_geometry(settings, command_inputs) or _root_component()
     if not geometry:
@@ -1768,6 +2267,12 @@ def _sync_ui(command_inputs):
     target_mode_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('target_mode'))
     target_input = adsk.core.SelectionCommandInput.cast(command_inputs.itemById('geometry'))
     target_hint = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('target_hint'))
+    batch_source_summary = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('batch_source_folder'))
+    batch_source_count = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('batch_source_count'))
+    batch_source_folder_value = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('batch_source_folder_value'))
+    batch_source_count_value = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('batch_source_count_value'))
+    batch_refresh_button = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('batch_refresh_folder'))
+    batch_include_subfolders_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('batch_include_subfolders'))
     destination_mode_input = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('destination_mode'))
     destination_hint = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('destination_hint'))
     print_format_selector = adsk.core.DropDownCommandInput.cast(command_inputs.itemById('destination_print_format'))
@@ -1779,6 +2284,7 @@ def _sync_ui(command_inputs):
     print_utility_mode_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('print_destination_utility_mode'))
     print_utility_value_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('print_destination_utility_value'))
     last_destination_mode_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('last_destination_mode'))
+    project_folder_saved_destination_mode_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('project_folder_saved_destination_mode'))
     format_note = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('format_note'))
     cad_preferences_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('cad_format_preferences'))
     last_target_mode_input = adsk.core.StringValueCommandInput.cast(command_inputs.itemById('last_target_mode'))
@@ -1799,6 +2305,12 @@ def _sync_ui(command_inputs):
         not target_mode_input or
         not target_input or
         not target_hint or
+        not batch_source_summary or
+        not batch_source_count or
+        not batch_source_folder_value or
+        not batch_source_count_value or
+        not batch_refresh_button or
+        not batch_include_subfolders_input or
         not destination_mode_input or
         not destination_hint or
         not print_format_selector or
@@ -1810,6 +2322,7 @@ def _sync_ui(command_inputs):
         not print_utility_mode_input or
         not print_utility_value_input or
         not last_destination_mode_input or
+        not project_folder_saved_destination_mode_input or
         not format_note or
         not cad_preferences_input or
         not last_target_mode_input or
@@ -1829,18 +2342,48 @@ def _sync_ui(command_inputs):
         return
 
     target_mode = settings.get('target_mode', 'selection')
+    project_folder_mode = target_mode == 'project_folder'
     target_input.isVisible = target_mode == 'selection'
+    batch_source_summary.isVisible = project_folder_mode
+    batch_source_count.isVisible = project_folder_mode
+    batch_refresh_button.isVisible = project_folder_mode
+    batch_include_subfolders_input.isVisible = project_folder_mode
     if target_mode == 'full_design':
         target_hint.formattedText = 'Exports the full design from the root component after temporarily showing everything.'
+    elif project_folder_mode:
+        target_hint.formattedText = 'Exports every Fusion design in the active Data Panel folder using your current Better Export settings. This mode always exports the full design.'
     elif target_mode == 'visible_bodies':
         target_hint.formattedText = 'Exports only bodies that are currently visible in the design.'
     else:
         target_hint.formattedText = 'Select a body, component, or occurrence to export.'
 
+    batch_source_summary.formattedText = batch_source_folder_value.value or _data_folder_display_name(_active_data_folder())
+    batch_source_summary.tooltip = batch_source_summary.formattedText
+    if _is_batch_folder_refresh_pending(command_inputs):
+        batch_source_count.formattedText = 'Refreshing active folder…'
+    else:
+        cached_count = _cached_batch_file_count(command_inputs)
+        batch_source_count.formattedText = '{} design file{}'.format(cached_count, '' if cached_count == 1 else 's')
+
+    previous_target_mode = (last_target_mode_input.value or '').strip() or target_mode
     destination_mode = _destination_mode_from_inputs(command_inputs)
+    if project_folder_mode and previous_target_mode != 'project_folder':
+        project_folder_saved_destination_mode_input.value = destination_mode
+    elif not project_folder_mode and previous_target_mode == 'project_folder':
+        saved_destination_mode = (project_folder_saved_destination_mode_input.value or '').strip()
+        if saved_destination_mode in DESTINATION_MODE_LABELS:
+            destination_mode = saved_destination_mode
+
+    try:
+        _ui_sync_in_progress = True
+        destination_mode = _sync_destination_mode_dropdown(destination_mode_input, destination_mode, project_folder_mode)
+    finally:
+        _ui_sync_in_progress = False
     print_destination_mode = destination_mode == 'print_utility'
 
-    if print_destination_mode:
+    if project_folder_mode:
+        destination_hint.formattedText = 'Batch export supports Direct Export or Sort Into Project Folders.'
+    elif print_destination_mode:
         destination_hint.formattedText = 'Send To Print Utility opens one mesh export directly in your selected slicer or print utility.'
     elif settings['auto_sort_after_export']:
         destination_hint.formattedText = 'Sort Into Project Folders organizes files into project folders automatically.'
@@ -1858,7 +2401,6 @@ def _sync_ui(command_inputs):
         print_format_input.value = active_mesh
     last_destination_mode_input.value = destination_mode
 
-    previous_target_mode = (last_target_mode_input.value or '').strip() or target_mode
     if visible_bodies_mode and previous_target_mode != 'visible_bodies':
         selected_cad = []
         for format_key in CAD_FORMAT_KEYS:
@@ -1938,12 +2480,17 @@ def _sync_ui(command_inputs):
 
 def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
     status_input = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('update_status'))
+    notes_input = adsk.core.TextBoxCommandInput.cast(command_inputs.itemById('update_notes'))
     auto_check_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('auto_check_updates'))
     update_now_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('update_now'))
     run_on_startup_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('run_on_startup'))
 
-    if not status_input or not auto_check_input or not update_now_input or not run_on_startup_input:
+    if not status_input or not notes_input or not auto_check_input or not update_now_input or not run_on_startup_input:
         return
+
+    notes_input.isVisible = False
+    notes_input.formattedText = ''
+    notes_input.tooltip = ''
 
     update_state = _current_update_state()
     current_version = _current_addin_version()
@@ -1998,6 +2545,11 @@ def _refresh_update_ui(command_inputs, force_refresh=False, manual=False):
         status_input.isVisible = True
         status_input.formattedText = 'Version v{} - <a href="{}">Update available: v{}</a>'.format(current_version, latest_url, latest_version)
         status_input.tooltip = latest_url
+        release_notes = _normalized_release_notes(release_info.get('latest_notes', ''))
+        if release_notes:
+            notes_input.isVisible = True
+            notes_input.formattedText = _release_notes_html(release_notes)
+            notes_input.tooltip = release_notes
         update_now_input.isVisible = True
         return
 
@@ -2147,13 +2699,32 @@ def _apply_options_from_settings(format_key, options, settings):
 
 
 def _validate_inputs(command_inputs):
+    settings = _current_settings_from_inputs(command_inputs)
+    destination_mode = _destination_mode_from_inputs(command_inputs)
+    target_mode = settings.get('target_mode', 'selection')
+    if target_mode == 'project_folder':
+        folder = _active_data_folder()
+        if not folder:
+            return False, 'Open the Fusion Data Panel and select a project folder first.'
+        if _is_batch_folder_refresh_pending(command_inputs):
+            return False, 'Refreshing the active project folder. Please wait a moment or use Refresh Active Folder again.'
+        if not settings.get('formats'):
+            return False, 'Select at least one export format.'
+        if settings.get('auto_sort_after_export'):
+            if not settings.get('sorted_output_folder'):
+                return False, 'Choose a sorted projects folder.'
+        elif not settings.get('folder'):
+            return False, 'Choose an export folder.'
+        if any(_settings_for_format(settings, format_key).get('send_to_print_utility') for format_key in settings.get('formats', [])):
+            return False, 'Export Project Folder does not support Send To Print Utility. Switch Destination to Direct Export or Sort Into Project Folders first.'
+        if _cached_batch_file_count(command_inputs) <= 0:
+            return False, 'No Fusion design files were found in the active project folder. Use Refresh Active Folder if needed.'
+        return True, ''
+
     design = _active_design()
     if not design:
         return False, 'Open a Fusion design before using this command.'
 
-    settings = _current_settings_from_inputs(command_inputs)
-    destination_mode = _destination_mode_from_inputs(command_inputs)
-    target_mode = settings.get('target_mode', 'selection')
     geometry = _target_geometry(settings, command_inputs)
     if not geometry:
         if target_mode == 'selection':
@@ -2319,6 +2890,11 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd = args.command
             cmd.okButtonText = 'Export'
             cmd.setDialogInitialSize(520, 660)
+            try:
+                # Treat Fusion-driven command dismissal like Cancel instead of implicitly executing Export.
+                cmd.isExecutedWhenPreEmpted = False
+            except Exception:
+                pass
 
             inputs = cmd.commandInputs
 
@@ -2326,6 +2902,16 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 'target_mode',
                 'Target',
                 adsk.core.DropDownStyles.TextListDropDownStyle
+            )
+            target_mode_input.listItems.add(
+                TARGET_MODE_LABELS['project_folder'],
+                settings.get('target_mode', 'selection') == 'project_folder',
+                ''
+            )
+            target_mode_input.listItems.add(
+                TARGET_MODE_DIVIDER_LABEL,
+                False,
+                ''
             )
             target_mode_input.listItems.add(
                 TARGET_MODE_LABELS['full_design'],
@@ -2349,7 +2935,40 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             target_input.addSelectionFilter('RootComponents')
             target_input.setSelectionLimits(0, 1)
             target_input.tooltip = 'Choose a body, component, or occurrence. To export everything from the root component, switch Target to Export Full Design.'
-
+            batch_source_summary = inputs.addTextBoxCommandInput(
+                'batch_source_folder',
+                'Project Folder',
+                _data_folder_display_name(_active_data_folder()),
+                1,
+                True
+            )
+            batch_source_summary.isFullWidth = True
+            batch_source_summary.isVisible = False
+            batch_source_count = inputs.addTextBoxCommandInput('batch_source_count', 'Files Found', 'Refreshes when Export Project Folder is selected.', 1, True)
+            batch_source_count.isFullWidth = True
+            batch_source_count.isVisible = False
+            batch_source_folder_value = inputs.addStringValueInput('batch_source_folder_value', 'Batch Source Folder Value', '')
+            batch_source_folder_value.isVisible = False
+            batch_source_count_value = inputs.addStringValueInput('batch_source_count_value', 'Batch Source Count Value', 'pending')
+            batch_source_count_value.isVisible = False
+            batch_refresh_button = inputs.addBoolValueInput('batch_refresh_folder', 'Refresh Active Folder', False, '', False)
+            batch_refresh_button.isVisible = False
+            batch_include_subfolders_input = inputs.addBoolValueInput(
+                'batch_include_subfolders',
+                'Include Subfolders',
+                True,
+                '',
+                bool(settings.get('batch_include_subfolders', False))
+            )
+            batch_include_subfolders_input.isVisible = False
+            move_timeline_input = inputs.addBoolValueInput(
+                'move_timeline_to_end',
+                'Move Timeline To End Before Export',
+                True,
+                '',
+                bool(settings.get('move_timeline_to_end', False))
+            )
+            move_timeline_input.tooltip = 'Temporarily moves the active document timeline marker to the end before exporting, then restores the original marker position afterward.'
             inputs.addTextBoxCommandInput(
                 'target_hint',
                 '',
@@ -2434,6 +3053,12 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 'print_utility' if settings.get('send_to_print_utility') else ('sorted' if settings['auto_sort_after_export'] else 'direct')
             )
             last_destination_mode_input.isVisible = False
+            project_folder_saved_destination_mode_input = inputs.addStringValueInput(
+                'project_folder_saved_destination_mode',
+                'Project Folder Saved Destination Mode',
+                'print_utility' if settings.get('send_to_print_utility') else ('sorted' if settings['auto_sort_after_export'] else 'direct')
+            )
+            project_folder_saved_destination_mode_input.isVisible = False
 
             selected_print_format = next((key for key in settings['formats'] if key in MESH_FORMAT_KEYS), MESH_FORMAT_KEYS[0])
             destination_print_format_selector = inputs.addDropDownCommandInput(
@@ -2604,6 +3229,10 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             update_now_input.isVisible = False
             update_table.addCommandInput(update_now_input, 0, 1, 0, 0)
 
+            update_notes = inputs.addTextBoxCommandInput('update_notes', 'Latest Release Notes', '', 8, True)
+            update_notes.isFullWidth = True
+            update_notes.isVisible = False
+
             inputs.addBoolValueInput(
                 'auto_check_updates',
                 'Check For Updates Automatically',
@@ -2622,6 +3251,11 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             run_on_startup_input.tooltip = 'Launch Better Export automatically when Fusion starts.'
 
             _sync_ui(inputs)
+            if settings.get('target_mode') == 'project_folder':
+                _set_batch_folder_pending_state(inputs)
+                adsk.doEvents()
+                _refresh_batch_folder_cache(inputs)
+                _sync_ui(inputs)
             _refresh_update_ui(inputs, force_refresh=False, manual=False)
 
             on_execute = ExecuteHandler()
@@ -2646,7 +3280,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
     def notify(self, args):
-        global _format_sync_in_progress, _ignored_format_uncheck_events
+        global _ui_sync_in_progress, _format_sync_in_progress, _ignored_format_uncheck_events
         try:
             if _ui_sync_in_progress:
                 return
@@ -2654,7 +3288,32 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
             changed_input = args.input
             inputs = args.inputs
 
-            if changed_input.id in ('browse_folder', 'browse_sorted_output_folder'):
+            if changed_input.id == 'batch_refresh_folder':
+                button = adsk.core.BoolValueCommandInput.cast(changed_input)
+                if button:
+                    button.value = False
+                _set_batch_folder_pending_state(inputs)
+                adsk.doEvents()
+                _refresh_batch_folder_cache(inputs)
+            elif changed_input.id == 'target_mode':
+                dropdown = adsk.core.DropDownCommandInput.cast(changed_input)
+                selected_label = _dropdown_selected_label(dropdown)
+                if selected_label == TARGET_MODE_DIVIDER_LABEL:
+                    previous_mode_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('last_target_mode'))
+                    previous_mode = (previous_mode_input.value or 'selection').strip()
+                    if previous_mode not in TARGET_MODE_LABELS:
+                        previous_mode = 'selection'
+                    try:
+                        _ui_sync_in_progress = True
+                        _select_dropdown_label(dropdown, TARGET_MODE_LABELS[previous_mode])
+                    finally:
+                        _ui_sync_in_progress = False
+                    return
+                if _target_mode_from_inputs(inputs) == 'project_folder':
+                    _set_batch_folder_pending_state(inputs)
+                    adsk.doEvents()
+                    _refresh_batch_folder_cache(inputs)
+            elif changed_input.id in ('browse_folder', 'browse_sorted_output_folder'):
                 button = adsk.core.BoolValueCommandInput.cast(changed_input)
                 dialog = _ui.createFolderDialog()
                 dialog.title = 'Choose {}'.format(
@@ -2725,6 +3384,10 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 print_format_input = adsk.core.StringValueCommandInput.cast(inputs.itemById('print_destination_format'))
                 if print_format_input:
                     print_format_input.value = _print_destination_format_from_inputs(inputs, MESH_FORMAT_KEYS[0])
+            elif changed_input.id == 'batch_include_subfolders':
+                _set_batch_folder_pending_state(inputs)
+                adsk.doEvents()
+                _refresh_batch_folder_cache(inputs)
             elif changed_input.id.startswith('format_'):
                 format_key = changed_input.id.replace('format_', '', 1)
                 if _destination_mode_from_inputs(inputs) == 'print_utility' and format_key in MESH_FORMAT_KEYS:
@@ -2786,6 +3449,8 @@ class ValidateHandler(adsk.core.ValidateInputsEventHandler):
                 target_hint.formattedText = message
             elif _target_mode_from_inputs(args.inputs) == 'full_design':
                 target_hint.formattedText = 'Exports the full design from the root component after temporarily showing everything.'
+            elif _target_mode_from_inputs(args.inputs) == 'project_folder':
+                target_hint.formattedText = 'Exports every Fusion design in the active Data Panel folder using your current Better Export settings. This mode always exports the full design.'
             elif _target_mode_from_inputs(args.inputs) == 'visible_bodies':
                 target_hint.formattedText = 'Exports only bodies that are currently visible in the design.'
             else:
@@ -2796,14 +3461,7 @@ class ValidateHandler(adsk.core.ValidateInputsEventHandler):
 
 class ExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
-        progress_dialog = None
-        export_succeeded = False
-        export_cancelled = False
-        open_after_export = False
-        reveal_path = ''
-        temp_staging_dir = None
-        full_root_state = None
-        design = None
+        global _batch_export_request
         try:
             inputs = args.command.commandInputs
             valid, message = _validate_inputs(inputs)
@@ -2811,152 +3469,142 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 raise ValueError(message)
 
             settings = _current_settings_from_inputs(inputs)
-            open_after_export = bool(settings.get('open_folder_after_export', True))
-            if any(_settings_for_format(settings, format_key).get('send_to_print_utility') for format_key in settings['formats']):
-                open_after_export = False
-            design = _active_design()
             target_mode = settings.get('target_mode', 'selection')
+            if target_mode == 'project_folder':
+                _save_settings(settings)
+                _batch_export_request = {
+                    'folder_label': _data_folder_display_name(_active_data_folder()),
+                    'files': _collect_batch_data_files(_active_data_folder(), bool(settings.get('batch_include_subfolders', False))),
+                    'settings': settings,
+                }
+                _app.fireCustomEvent(BATCH_EXPORT_EVENT_ID)
+                return
             geometry = _target_geometry(settings, inputs)
-            if target_mode == 'full_design':
-                full_root_state = _prepare_full_root_export(design)
-            elif target_mode == 'visible_bodies':
-                full_root_state = _prepare_visible_bodies_export(design)
+            _execute_exports(settings, geometry, target_mode, show_progress=True, persist_settings=True)
+        except Exception as exc:
+            _show_error(str(exc))
 
-            total_exports = len(settings['formats'])
+
+def _validate_batch_export_request(folder, settings, include_subfolders):
+    if not folder:
+        return False, 'Open the Fusion Data Panel and select a project folder first.'
+    if not settings.get('formats'):
+        return False, 'Select at least one export format in Better Export first.'
+    if settings.get('auto_sort_after_export'):
+        if not settings.get('sorted_output_folder'):
+            return False, 'Choose a sorted projects folder in Better Export first.'
+    elif not settings.get('folder'):
+        return False, 'Choose an export folder in Better Export first.'
+
+    if any(_settings_for_format(settings, format_key).get('send_to_print_utility') for format_key in settings.get('formats', [])):
+        return False, 'Export Project Folder does not support Send To Print Utility. Switch Destination to Direct Export or Sort Into Project Folders first.'
+
+    if not _collect_batch_data_files(folder, include_subfolders):
+        return False, 'No Fusion design files were found in the selected project folder.'
+    return True, ''
+
+
+class BatchExportCustomEventHandler(adsk.core.CustomEventHandler):
+    def notify(self, args):
+        global _batch_export_request
+        request = _batch_export_request
+        _batch_export_request = None
+        if not request:
+            return
+
+        progress_dialog = None
+        opened_document = None
+        starting_document = _safe_call(lambda: _app.activeDocument)
+        preexisting_documents = _snapshot_open_documents()
+        failures = []
+        completed = 0
+        try:
+            files = list(request.get('files') or [])
+            settings = _merge_settings(request.get('settings') or {})
             progress_dialog = _ui.createProgressDialog() if _ui else None
             if progress_dialog:
                 progress_dialog.cancelButtonText = ''
                 progress_dialog.isCancelButtonShown = False
                 progress_dialog.show(
-                    'Better Export',
-                    'Preparing exports...',
+                    BATCH_COMMAND_NAME,
+                    'Preparing batch export...',
                     0,
-                    max(1, total_exports),
+                    max(1, len(files)),
                     0
                 )
 
-            for index, format_key in enumerate(settings['formats'], start=1):
-                format_settings = _settings_for_format(settings, format_key)
-                format_settings['filename'] = _sanitize_filename(format_settings['filename'] or _default_filename())
-                if settings['settings_mode'] == 'global':
-                    settings['filename'] = format_settings['filename']
-                else:
-                    settings['per_format_settings'][format_key]['filename'] = format_settings['filename']
+            for index, data_file in enumerate(files, start=1):
+                file_name = (_safe_call(lambda df=data_file: df.name) or 'Untitled').strip() or 'Untitled'
+                try:
+                    if progress_dialog:
+                        progress_dialog.progressValue = index - 1
+                        progress_dialog.message = 'Opening {} ({} of {})...'.format(file_name, index, len(files))
+                        adsk.doEvents()
 
-                export_path = ''
-                if not format_settings['send_to_print_utility']:
-                    export_folder = settings['folder']
-                    if settings['auto_sort_after_export']:
-                        if temp_staging_dir is None:
-                            temp_staging_dir = tempfile.mkdtemp(prefix='better-export-')
-                        export_folder = temp_staging_dir
-                    os.makedirs(export_folder, exist_ok=True)
-                    export_path = os.path.join(
-                        export_folder,
-                        '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
-                    )
-                elif format_key == 'obj':
-                    if temp_staging_dir is None:
-                        temp_staging_dir = tempfile.mkdtemp(prefix='better-export-')
-                    export_path = os.path.join(
-                        temp_staging_dir,
-                        '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
-                    )
-
-                format_geometry = _geometry_for_format(format_key, geometry)
-                if not format_geometry:
-                    raise ValueError('Fusion could not resolve valid geometry for the {} export.'.format(FORMAT_LABELS[format_key]))
-
-                if progress_dialog:
-                    progress_dialog.progressValue = index - 1
-                    progress_dialog.message = 'Exporting {} ({} of {})...'.format(
-                        FORMAT_LABELS[format_key],
-                        index,
-                        total_exports
-                    )
-
-                if format_key == 'smt':
-                    success = _export_sat_or_smt_with_temporary_brep(format_key, format_geometry, export_path)
-                else:
-                    options = _create_export_options(format_key, format_geometry, export_path)
-                    _apply_options_from_settings(format_key, options, format_settings)
-                    success = design.exportManager.execute(options)
-                if not success:
-                    raise RuntimeError('Fusion reported that the {} export did not complete.'.format(FORMAT_LABELS[format_key]))
-
-                if format_key == '3mf' and target_mode == 'visible_bodies' and export_path:
-                    _remove_empty_visible_body_3mf_outputs(
-                        os.path.dirname(export_path),
-                        format_settings['filename']
-                    )
-
-                if progress_dialog:
-                    progress_dialog.progressValue = index
-
-            if settings['auto_sort_after_export']:
-                if progress_dialog:
-                    progress_dialog.message = 'Sorting exported files...'
+                    opened_document = _app.documents.open(data_file)
                     adsk.doEvents()
-                conflict_resolver = None
-                if not settings['allow_overwrite']:
-                    scanned_conflicts = scan_export_conflicts(
-                        temp_staging_dir,
-                        settings['sorted_output_folder'],
-                        strip_version_numbers=settings.get('strip_version_numbers', True)
+                    export_settings = _merge_settings(settings)
+                    export_settings['open_folder_after_export'] = False
+                    result = _execute_exports(
+                        export_settings,
+                        _root_component(),
+                        'full_design',
+                        show_progress=False,
+                        persist_settings=False,
+                        force_default_filenames=True,
+                        raise_on_error=True
                     )
-                    if scanned_conflicts:
-                        conflict_action = _choose_sort_conflict_action(scanned_conflicts)
-                        if conflict_action == 'skip':
-                            export_cancelled = True
-                        conflict_resolver = (lambda source, target, operation, keep_both_target, action=conflict_action: action)
-                    else:
-                        def _tracking_single_conflict_resolver(source, target, operation, keep_both_target):
-                            nonlocal export_cancelled
-                            action = _choose_single_sort_conflict_action(source, target, operation, keep_both_target)
-                            if action == 'skip':
-                                export_cancelled = True
-                            return action
-                        conflict_resolver = _tracking_single_conflict_resolver
-                sort_result = process_exports(
-                    temp_staging_dir,
-                    settings['sorted_output_folder'],
-                    allow_overwrite=settings['allow_overwrite'],
-                    conflict_resolver=conflict_resolver,
-                    strip_version_numbers=settings.get('strip_version_numbers', True)
-                )
-                if sort_result.get('conflicts_skipped'):
-                    export_cancelled = True
-
-            _save_settings(settings)
-            reveal_path = _sorted_project_folder_for_settings(settings) if settings['auto_sort_after_export'] else settings['folder']
-            export_succeeded = True
+                    completed += 1 if result.get('succeeded') else 0
+                except Exception as exc:
+                    failures.append('{}: {}'.format(file_name, str(exc)))
+                finally:
+                    if opened_document:
+                        try:
+                            if not _is_preexisting_document(opened_document, preexisting_documents, starting_document):
+                                opened_document.close(False)
+                        except Exception:
+                            pass
+                        opened_document = None
+                    if progress_dialog:
+                        progress_dialog.progressValue = index
+            summary = 'Batch export finished.\n\n{} of {} design files exported successfully from {}.'.format(
+                completed,
+                len(files),
+                request.get('folder_label', 'the selected folder')
+            )
+            if failures:
+                summary += '\n\nFailed:\n- ' + '\n- '.join(failures[:10])
+                if len(failures) > 10:
+                    summary += '\n- ...and {} more'.format(len(failures) - 10)
+            _ui.messageBox(summary, BATCH_COMMAND_NAME)
+            if completed and settings.get('open_folder_after_export'):
+                reveal_path = settings.get('sorted_output_folder') if settings.get('auto_sort_after_export') else settings.get('folder', '')
+                if reveal_path:
+                    _open_folder_in_system(reveal_path)
         except Exception as exc:
-            _show_error(str(exc))
+            if opened_document:
+                try:
+                    if not _is_preexisting_document(opened_document, preexisting_documents, starting_document):
+                        opened_document.close(False)
+                except Exception:
+                    pass
+            summary = 'Batch export stopped after {} of {} files.\n\n{}'.format(
+                completed,
+                len(request.get('files') or []),
+                '\n'.join(failures[-5:]) if failures else str(exc)
+            )
+            _ui.messageBox(summary, BATCH_COMMAND_NAME)
         finally:
             if progress_dialog:
                 try:
-                    if export_succeeded:
-                        progress_dialog.progressValue = len(settings['formats']) if 'settings' in locals() else progress_dialog.progressValue
-                        progress_dialog.message = 'Export cancelled.' if export_cancelled else 'Export successful.'
-                        adsk.doEvents()
-                        time.sleep(1)
                     progress_dialog.hide()
                 except Exception:
                     pass
-            if temp_staging_dir and os.path.isdir(temp_staging_dir):
+            if starting_document:
                 try:
-                    shutil.rmtree(temp_staging_dir)
+                    starting_document.activate()
                 except Exception:
                     pass
-            if full_root_state:
-                _restore_full_root_state(design or _active_design(), full_root_state)
-            if export_succeeded and not export_cancelled and open_after_export:
-                try:
-                    _open_folder_in_system(reveal_path)
-                except Exception:
-                    pass
-
-
 class DestroyHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         pass
@@ -3024,6 +3672,11 @@ def run(context):
         command_definition.commandCreated.add(on_command_created)
         _handlers.append(on_command_created)
 
+        batch_custom_event = _app.registerCustomEvent(BATCH_EXPORT_EVENT_ID)
+        on_batch_event = BatchExportCustomEventHandler()
+        batch_custom_event.add(on_batch_event)
+        _handlers.append(on_batch_event)
+
         marking_menu_event = _ui.markingMenuDisplaying
         if marking_menu_event:
             on_marking_menu = MarkingMenuHandler()
@@ -3083,6 +3736,11 @@ def stop(context):
             definition = _ui.commandDefinitions.itemById(COMMAND_ID)
             if definition:
                 definition.deleteMe()
+        if _app:
+            try:
+                _app.unregisterCustomEvent(BATCH_EXPORT_EVENT_ID)
+            except Exception:
+                pass
     except Exception:
         if _ui:
             _ui.messageBox('Add-in stop failed:\n{}'.format(traceback.format_exc()))

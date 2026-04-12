@@ -15,10 +15,12 @@ Better Export can:
 - Remember commonly used settings and folders
 - Support either direct export or automatic post-export sorting
 - Keep project-specific behavior where it matters, including export folders and auto-sort preferences
-- Export either currently visible bodies or a specific selection
+- Export a full design, only visible bodies, a specific selection, or every design in the active Fusion project folder
 - Use either shared settings across formats or separate settings per format
+- Optionally move the timeline marker to the end before export, then restore it afterward
 - Send a single mesh export directly to Fusion’s print utility workflow
 - Open the export destination automatically after a successful export
+- Show the latest release notes in-app when an update is available
 - Integrate naturally into Fusion with a toolbar button, Browser context-menu entry, and visible batch progress
 
 ## Why use it
@@ -31,6 +33,12 @@ Fusion’s built-in export tools work, but repeated exports can get repetitive q
 - manually cleaning up the resulting files afterward
 
 Better Export is built to reduce that friction and make repeated export workflows feel faster and more predictable.
+
+## Batch export
+
+Better Export can also export every Fusion design in the active Data Panel folder using your current Better Export settings.
+
+This is useful when you want the same set of outputs for a whole group of designs without opening and exporting each one manually. Batch export always exports the full design for each file, and if **Open Destination After Export** is enabled, the destination opens only after the full batch finishes.
 
 ## A note about F3Z
 
@@ -148,12 +156,14 @@ It also adds **Better Export** to the Browser right-click menu for exportable it
 - Settings are stored locally in `BetterExport/settings.json`
 - Most preferences save as soon as they are changed, even if the dialog is closed without exporting
 - `File Name` is intentionally not persisted and refreshes from the active Fusion document each time the dialog opens
-- The `Target` control lets you export only currently visible bodies or a specific selection
+- The `Target` control supports full-design export, visible-body export, selection export, and project-folder batch export
+- **Move Timeline To End Before Export** can temporarily move the timeline marker to the end before exporting, then restore the original position afterward
+- When an update is available, Better Export can show the latest release notes in the add-in before you choose to update
 - Some options appear only when the installed Fusion version exposes the required API support
 
 ## Update checks
 
-Better Export can let you know when a newer release is available, and it can also stage an update from inside Fusion when a new release is ready.
+Better Export can let you know when a newer release is available, show the latest release notes in the add-in, and stage an update from inside Fusion when a new release is ready.
 
 ## Project structure
 
