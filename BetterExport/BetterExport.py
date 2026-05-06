@@ -181,6 +181,7 @@ _ui_sync_in_progress = False
 _format_sync_in_progress = False
 _ignored_format_uncheck_events = set()
 _batch_export_request = None
+_focused_filename_input_id = ''
 
 
 def _open_folder_in_system(path_value):
@@ -2819,6 +2820,11 @@ def _choose_single_sort_conflict_action(source, target, operation, keep_both_tar
 def _persist_current_preferences(inputs):
     settings = _current_settings_from_inputs(inputs)
     if settings:
+        # File-name fields are intentionally ephemeral and regenerated each session.
+        settings['filename'] = ''
+        for format_key in FORMAT_LABELS:
+            if format_key in settings.get('per_format_settings', {}):
+                settings['per_format_settings'][format_key]['filename'] = ''
         _save_settings(settings)
 
 
@@ -3474,13 +3480,15 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
     def notify(self, args):
-        global _ui_sync_in_progress, _format_sync_in_progress, _ignored_format_uncheck_events
+        global _ui_sync_in_progress, _format_sync_in_progress, _ignored_format_uncheck_events, _focused_filename_input_id
         try:
             if _ui_sync_in_progress:
                 return
 
             changed_input = args.input
             inputs = args.inputs
+            skip_full_ui_sync = False
+            skip_preference_persist = False
 
             if changed_input.id == 'batch_refresh_folder':
                 button = adsk.core.BoolValueCommandInput.cast(changed_input)
@@ -3630,11 +3638,24 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                         cad_preferences_input.value = ','.join(selected_cad)
 
             if changed_input.id.endswith('filename'):
-                filename_input = adsk.core.StringValueCommandInput.cast(changed_input)
-                filename_input.value = _sanitize_filename(filename_input.value)
+                # Don't rewrite while typing; assigning .value can reset caret position.
+                # Filenames are sanitized later at export-time.
+                skip_full_ui_sync = True
+                # Persisting on every keystroke can also trigger Fusion-side input refresh
+                # and disturb caret position.
+                skip_preference_persist = True
+                _focused_filename_input_id = changed_input.id
+            elif _focused_filename_input_id:
+                # Blur detected: sanitize once focus leaves filename field.
+                previous_filename_input = adsk.core.StringValueCommandInput.cast(inputs.itemById(_focused_filename_input_id))
+                if previous_filename_input:
+                    previous_filename_input.value = _sanitize_filename(previous_filename_input.value)
+                _focused_filename_input_id = ''
 
-            _sync_ui(inputs)
-            _persist_current_preferences(inputs)
+            if not skip_full_ui_sync:
+                _sync_ui(inputs)
+            if not skip_preference_persist:
+                _persist_current_preferences(inputs)
         except Exception:
             _show_error(traceback.format_exc())
 
@@ -3642,6 +3663,9 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
 class ValidateHandler(adsk.core.ValidateInputsEventHandler):
     def notify(self, args):
         try:
+            if _focused_filename_input_id:
+                args.areInputsValid = True
+                return
             valid, message = _validate_inputs(args.inputs)
             args.areInputsValid = valid
             target_hint = args.inputs.itemById('target_hint')
