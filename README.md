@@ -172,6 +172,26 @@ Better Export can let you know when a newer release is available, show the lates
 - `BetterExport/BetterExport.manifest` — Fusion add-in manifest
 - `BetterExport/HOW TO INSTALL.txt` — packaged quick-install guide
 
+## Maintainer release packaging
+
+Release archives must always be built by the repo packaging script so updater zips stay compatible across macOS and Windows, including users on older updater code.
+
+Use:
+
+- macOS/Linux: `python3 scripts/package_release.py`
+- Windows (PowerShell): `python scripts/package_release.py`
+
+Do not publish zips produced by OS zip tools or ad-hoc zip commands.
+
+The packaging script validates artifacts before returning:
+
+- entry names use `/` separators (no `\\`)
+- no absolute entry paths
+- no `..` path traversal segments
+- every entry starts with `BetterExport/`
+
+See `MAINTAINER.md` for full release workflow and sanity checks.
+
 ## Status
 
 Better Export is ready to use today and is intended to be practical for real day-to-day export workflows. Future updates may expand format coverage, improve UI details, and support additional Fusion export behaviors as Autodesk’s API allows. This project is already useful now, with room to keep improving over time.

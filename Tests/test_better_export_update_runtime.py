@@ -147,6 +147,42 @@ class BetterExportUpdateRuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(self.manifest_path.read_text(encoding='utf-8'))['version'], '1.4.6')
         self.assertFalse(self.pending_dir.exists())
 
+    def test_stage_update_payload_succeeds_for_canonical_release_zip(self):
+        def write_asset_zip(_asset_url, destination_path):
+            with zipfile.ZipFile(destination_path, 'w') as archive:
+                archive.writestr('BetterExport/BetterExport.py', '# staged update')
+                archive.writestr('BetterExport/BetterExport.manifest', '{"version":"1.5.0"}')
+
+        release_info = {
+            'latest_version': '1.5.0',
+            'latest_asset_url': 'https://example.invalid/BetterExport-1.5.0.zip',
+            'latest_asset_name': 'BetterExport-1.5.0.zip',
+        }
+
+        with mock.patch.object(better_export, '_download_release_asset', side_effect=write_asset_zip):
+            update_info = better_export._stage_update_payload(release_info)
+
+        staged_addin_dir = Path(update_info['staged_addin_dir'])
+        self.assertTrue((staged_addin_dir / 'BetterExport.py').is_file())
+
+    def test_stage_update_payload_succeeds_for_backslash_entry_release_zip(self):
+        def write_asset_zip(_asset_url, destination_path):
+            with zipfile.ZipFile(destination_path, 'w') as archive:
+                archive.writestr('BetterExport\\BetterExport.py', '# staged update')
+                archive.writestr('BetterExport\\BetterExport.manifest', '{"version":"1.5.0"}')
+
+        release_info = {
+            'latest_version': '1.5.0',
+            'latest_asset_url': 'https://example.invalid/BetterExport-1.5.0.zip',
+            'latest_asset_name': 'BetterExport-1.5.0.zip',
+        }
+
+        with mock.patch.object(better_export, '_download_release_asset', side_effect=write_asset_zip):
+            update_info = better_export._stage_update_payload(release_info)
+
+        staged_addin_dir = Path(update_info['staged_addin_dir'])
+        self.assertTrue((staged_addin_dir / 'BetterExport.py').is_file())
+
     def test_filename_with_optional_configuration_replaces_prior_configuration_suffix(self):
         class _Row:
             def __init__(self, name):

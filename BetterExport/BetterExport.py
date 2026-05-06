@@ -3,6 +3,8 @@ import html
 import importlib
 import importlib.util
 import os
+import posixpath
+import re
 import shutil
 import sys
 import tempfile
@@ -1241,6 +1243,45 @@ def _find_extracted_addin_dir(extract_root):
     return ''
 
 
+def _normalized_zip_entry_path(entry_name):
+    normalized = str(entry_name or '').replace('\\', '/')
+    return posixpath.normpath(normalized)
+
+
+def _is_unsafe_zip_entry_path(normalized_entry_name):
+    if not normalized_entry_name or normalized_entry_name == '.':
+        return True
+    if normalized_entry_name.startswith('/'):
+        return True
+    if re.match(r'^[A-Za-z]:/', normalized_entry_name):
+        return True
+    parts = [part for part in normalized_entry_name.split('/') if part]
+    return any(part == '..' for part in parts)
+
+
+def _safe_extract_release_archive(archive, destination_root):
+    os.makedirs(destination_root, exist_ok=True)
+    destination_root = os.path.normpath(destination_root)
+    for info in archive.infolist():
+        normalized_name = _normalized_zip_entry_path(info.filename)
+        if _is_unsafe_zip_entry_path(normalized_name):
+            raise ValueError('Unsafe path in release package: {}'.format(info.filename))
+
+        destination_path = os.path.normpath(os.path.join(destination_root, *normalized_name.split('/')))
+        if os.path.commonpath([destination_root, destination_path]) != destination_root:
+            raise ValueError('Unsafe path in release package: {}'.format(info.filename))
+
+        if info.is_dir() or normalized_name.endswith('/'):
+            os.makedirs(destination_path, exist_ok=True)
+            continue
+
+        parent_dir = os.path.dirname(destination_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        with archive.open(info, 'r') as source_handle, open(destination_path, 'wb') as target_handle:
+            shutil.copyfileobj(source_handle, target_handle)
+
+
 def _updater_script_contents():
     return r'''import os
 import shutil
@@ -1352,7 +1393,7 @@ def _stage_update_payload(release_info):
     os.makedirs(extract_root, exist_ok=True)
     _download_release_asset(asset_url, zip_path)
     with zipfile.ZipFile(zip_path, 'r') as archive:
-        archive.extractall(extract_root)
+        _safe_extract_release_archive(archive, extract_root)
 
     extracted_addin_dir = _find_extracted_addin_dir(extract_root)
     if not extracted_addin_dir:
