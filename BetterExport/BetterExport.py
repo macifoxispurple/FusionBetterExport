@@ -149,6 +149,8 @@ GENERAL_DEFAULTS = {
     'allow_overwrite': True,
     'strip_version_numbers': True,
     'append_configuration_name': False,
+    'append_configuration_name_user_preference': False,
+    'export_all_configurations': False,
     'open_folder_after_export': True,
     'move_timeline_to_end': False,
     'mesh_group_expanded': True,
@@ -467,6 +469,20 @@ def _active_configuration_name(design=None):
     active_row = _safe_call(lambda t=table: t.activeRow) if table else None
     name = _safe_call(lambda row=active_row: row.name) if active_row else ''
     return name.strip() if isinstance(name, str) else ''
+
+
+def _configuration_rows(design):
+    if not design:
+        return []
+    table = _safe_call(lambda d=design: d.configurationTopTable)
+    rows = _safe_call(lambda t=table: t.rows) if table else None
+    count = _safe_call(lambda collection=rows: collection.count) if rows else 0
+    result = []
+    for index in range(count or 0):
+        row = _safe_call(lambda collection=rows, i=index: collection.item(i))
+        if row:
+            result.append(row)
+    return result
 
 
 def _filename_with_optional_configuration(settings, base_name, design=None):
@@ -861,6 +877,7 @@ def _execute_exports(settings, geometry, target_mode, show_progress=True, persis
     export_view_state = None
     timeline_state = None
     design = None
+    original_configuration_row = None
     try:
         open_after_export = bool(settings.get('open_folder_after_export', True))
         if any(_settings_for_format(settings, format_key).get('send_to_print_utility') for format_key in settings['formats']):
@@ -884,7 +901,21 @@ def _execute_exports(settings, geometry, target_mode, show_progress=True, persis
         if restore_view_state is None:
             restore_view_state = export_view_state
 
-        total_exports = len(settings['formats'])
+        configuration_rows = [None]
+        if settings.get('export_all_configurations'):
+            table = _safe_call(lambda d=design: d.configurationTopTable)
+            original_configuration_row = _safe_call(lambda t=table: t.activeRow) if table else None
+            formats = list(settings.get('formats', []))
+            non_f3d_formats = [format_key for format_key in formats if format_key != 'f3d']
+            if non_f3d_formats:
+                rows = _configuration_rows(design)
+                if rows:
+                    configuration_rows = rows
+
+        if settings.get('export_all_configurations') and len(configuration_rows) > 1:
+            total_exports = sum(1 if format_key == 'f3d' else len(configuration_rows) for format_key in settings['formats'])
+        else:
+            total_exports = len(settings['formats']) * len(configuration_rows)
         if show_progress and _ui:
             progress_dialog = _ui.createProgressDialog()
             progress_dialog.cancelButtonText = ''
@@ -897,64 +928,78 @@ def _execute_exports(settings, geometry, target_mode, show_progress=True, persis
                 0
             )
 
-        for index, format_key in enumerate(settings['formats'], start=1):
-            format_settings = _settings_for_format(settings, format_key)
-            resolved_filename = _default_filename(design) if force_default_filenames else (format_settings['filename'] or _default_filename(design))
-            format_settings['filename'] = _filename_with_optional_configuration(settings, resolved_filename, design)
-            if settings['settings_mode'] == 'global':
-                settings['filename'] = format_settings['filename']
-            else:
-                settings['per_format_settings'][format_key]['filename'] = format_settings['filename']
+        export_index = 0
+        f3d_exported = False
+        for configuration_row in configuration_rows:
+            if configuration_row is not None:
+                _safe_call(lambda row=configuration_row: row.activate())
+                adsk.doEvents()
+            for format_key in settings['formats']:
+                if settings.get('export_all_configurations') and format_key == 'f3d':
+                    if f3d_exported:
+                        continue
+                    f3d_exported = True
+                export_index += 1
+                format_settings = _settings_for_format(settings, format_key)
+                if format_key == 'f3d':
+                    format_settings['filename'] = _default_filename(design)
+                else:
+                    resolved_filename = _default_filename(design) if force_default_filenames else (format_settings['filename'] or _default_filename(design))
+                    format_settings['filename'] = _filename_with_optional_configuration(settings, resolved_filename, design)
+                if settings['settings_mode'] == 'global':
+                    settings['filename'] = format_settings['filename']
+                else:
+                    settings['per_format_settings'][format_key]['filename'] = format_settings['filename']
 
-            export_path = ''
-            if not format_settings['send_to_print_utility']:
-                export_folder = settings['folder']
-                if settings['auto_sort_after_export']:
+                export_path = ''
+                if not format_settings['send_to_print_utility']:
+                    export_folder = settings['folder']
+                    if settings['auto_sort_after_export']:
+                        if temp_staging_dir is None:
+                            temp_staging_dir = tempfile.mkdtemp(prefix='better-export-')
+                        export_folder = temp_staging_dir
+                    os.makedirs(export_folder, exist_ok=True)
+                    export_path = os.path.join(
+                        export_folder,
+                        '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
+                    )
+                elif format_key == 'obj':
                     if temp_staging_dir is None:
                         temp_staging_dir = tempfile.mkdtemp(prefix='better-export-')
-                    export_folder = temp_staging_dir
-                os.makedirs(export_folder, exist_ok=True)
-                export_path = os.path.join(
-                    export_folder,
-                    '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
-                )
-            elif format_key == 'obj':
-                if temp_staging_dir is None:
-                    temp_staging_dir = tempfile.mkdtemp(prefix='better-export-')
-                export_path = os.path.join(
-                    temp_staging_dir,
-                    '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
-                )
+                    export_path = os.path.join(
+                        temp_staging_dir,
+                        '{}.{}'.format(format_settings['filename'], _format_extension(format_key))
+                    )
 
-            format_geometry = _geometry_for_format(format_key, geometry)
-            if not format_geometry:
-                raise ValueError('Fusion could not resolve valid geometry for the {} export.'.format(FORMAT_LABELS[format_key]))
+                format_geometry = _geometry_for_format(format_key, geometry)
+                if not format_geometry:
+                    raise ValueError('Fusion could not resolve valid geometry for the {} export.'.format(FORMAT_LABELS[format_key]))
 
-            if progress_dialog:
-                progress_dialog.progressValue = index - 1
-                progress_dialog.message = 'Exporting {} ({} of {})...'.format(
-                    FORMAT_LABELS[format_key],
-                    index,
-                    total_exports
-                )
+                if progress_dialog:
+                    progress_dialog.progressValue = export_index - 1
+                    progress_dialog.message = 'Exporting {} ({} of {})...'.format(
+                        FORMAT_LABELS[format_key],
+                        export_index,
+                        total_exports
+                    )
 
-            if format_key == 'smt':
-                success = _export_sat_or_smt_with_temporary_brep(format_key, format_geometry, export_path)
-            else:
-                options = _create_export_options(format_key, format_geometry, export_path)
-                _apply_options_from_settings(format_key, options, format_settings)
-                success = design.exportManager.execute(options)
-            if not success:
-                raise RuntimeError('Fusion reported that the {} export did not complete.'.format(FORMAT_LABELS[format_key]))
+                if format_key == 'smt':
+                    success = _export_sat_or_smt_with_temporary_brep(format_key, format_geometry, export_path)
+                else:
+                    options = _create_export_options(format_key, format_geometry, export_path)
+                    _apply_options_from_settings(format_key, options, format_settings)
+                    success = design.exportManager.execute(options)
+                if not success:
+                    raise RuntimeError('Fusion reported that the {} export did not complete.'.format(FORMAT_LABELS[format_key]))
 
-            if format_key == '3mf' and target_mode == 'visible_bodies' and export_path:
-                _remove_empty_visible_body_3mf_outputs(
-                    os.path.dirname(export_path),
-                    format_settings['filename']
-                )
+                if format_key == '3mf' and target_mode == 'visible_bodies' and export_path:
+                    _remove_empty_visible_body_3mf_outputs(
+                        os.path.dirname(export_path),
+                        format_settings['filename']
+                    )
 
-            if progress_dialog:
-                progress_dialog.progressValue = index
+                if progress_dialog:
+                    progress_dialog.progressValue = export_index
 
         if settings['auto_sort_after_export']:
             if progress_dialog:
@@ -1014,13 +1059,16 @@ def _execute_exports(settings, geometry, target_mode, show_progress=True, persis
         if progress_dialog:
             try:
                 if export_succeeded:
-                    progress_dialog.progressValue = len(settings['formats']) if 'settings' in locals() else progress_dialog.progressValue
+                    progress_dialog.progressValue = total_exports if 'total_exports' in locals() else progress_dialog.progressValue
                     progress_dialog.message = 'Export cancelled.' if export_cancelled else 'Export successful.'
                     adsk.doEvents()
                     time.sleep(1)
                 progress_dialog.hide()
             except Exception:
                 pass
+        if original_configuration_row is not None:
+            _safe_call(lambda row=original_configuration_row: row.activate())
+            adsk.doEvents()
         if temp_staging_dir and os.path.isdir(temp_staging_dir):
             try:
                 shutil.rmtree(temp_staging_dir)
@@ -1552,6 +1600,8 @@ def _read_general_settings(inputs):
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
     strip_version_numbers = _read_bool_input(inputs, 'strip_version_numbers')
     append_configuration_name = _read_bool_input(inputs, 'append_configuration_name')
+    append_configuration_name_user_preference = _read_bool_input(inputs, 'append_configuration_name_user_preference')
+    export_all_configurations = _read_bool_input(inputs, 'export_all_configurations')
     open_folder_after_export = _read_bool_input(inputs, 'open_folder_after_export')
     move_timeline_to_end = _read_bool_input(inputs, 'move_timeline_to_end')
     batch_include_subfolders = _read_bool_input(inputs, 'batch_include_subfolders')
@@ -1570,12 +1620,24 @@ def _read_general_settings(inputs):
         allow_overwrite,
         strip_version_numbers,
         append_configuration_name,
+        append_configuration_name_user_preference,
+        export_all_configurations,
         open_folder_after_export,
         move_timeline_to_end,
         customize_per_format,
         f3d_enabled_preference
     ):
         return None
+
+    if export_all_configurations:
+        append_configuration_name = True
+        if append_configuration_name_user_preference is None:
+            append_configuration_name_user_preference = bool(append_configuration_name)
+    else:
+        if append_configuration_name_user_preference is None:
+            append_configuration_name_user_preference = bool(append_configuration_name)
+        append_configuration_name = bool(append_configuration_name_user_preference)
+        append_configuration_name_user_preference = bool(append_configuration_name_user_preference)
 
     return {
         'folder': folder,
@@ -1589,6 +1651,8 @@ def _read_general_settings(inputs):
         'allow_overwrite': allow_overwrite,
         'strip_version_numbers': strip_version_numbers,
         'append_configuration_name': append_configuration_name,
+        'append_configuration_name_user_preference': append_configuration_name_user_preference,
+        'export_all_configurations': bool(export_all_configurations),
         'open_folder_after_export': open_folder_after_export,
         'move_timeline_to_end': move_timeline_to_end,
         'batch_include_subfolders': batch_include_subfolders,
@@ -2383,6 +2447,9 @@ def _sync_ui(command_inputs):
     browse_sorted_output_button = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('browse_sorted_output_folder'))
     overwrite_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('allow_overwrite'))
     strip_versions_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('strip_version_numbers'))
+    append_config_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('append_configuration_name'))
+    append_config_pref_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('append_configuration_name_user_preference'))
+    export_all_configs_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('export_all_configurations'))
     open_folder_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('open_folder_after_export'))
     customize_per_format_input = adsk.core.BoolValueCommandInput.cast(command_inputs.itemById('customize_per_format'))
     mesh_group_input = adsk.core.GroupCommandInput.cast(command_inputs.itemById('mesh_format_group'))
@@ -2421,6 +2488,9 @@ def _sync_ui(command_inputs):
         not browse_sorted_output_button or
         not overwrite_input or
         not strip_versions_input or
+        not append_config_input or
+        not append_config_pref_input or
+        not export_all_configs_input or
         not open_folder_input or
         not customize_per_format_input or
         not mesh_group_input or
@@ -2521,6 +2591,8 @@ def _sync_ui(command_inputs):
     browse_sorted_output_button.isVisible = settings['auto_sort_after_export'] and not print_destination_mode
     overwrite_input.isVisible = settings['auto_sort_after_export']
     strip_versions_input.isVisible = settings['auto_sort_after_export']
+    append_config_input.isVisible = not print_destination_mode
+    export_all_configs_input.isVisible = not print_destination_mode
     open_folder_input.isVisible = not print_destination_mode
     print_format_selector.isVisible = print_destination_mode
     print_selector.isVisible = print_destination_mode
@@ -2533,6 +2605,17 @@ def _sync_ui(command_inputs):
     folder_summary.tooltip = settings['folder']
     sorted_output_summary.formattedText = _short_path(settings['sorted_output_folder'])
     sorted_output_summary.tooltip = settings['sorted_output_folder']
+    append_pref_value = bool(settings.get('append_configuration_name_user_preference', settings.get('append_configuration_name', False)))
+    if export_all_configs_input.value:
+        if not append_config_input.value:
+            append_config_pref_input.value = append_pref_value
+        append_config_input.value = True
+        append_config_input.isEnabled = False
+    else:
+        append_config_input.isEnabled = True
+        if append_config_input.value != append_pref_value:
+            append_config_input.value = append_pref_value
+        append_config_pref_input.value = append_config_input.value
     open_folder_input.value = bool(settings.get('open_folder_after_export', True))
     selected_mesh_for_print = next((key for key in settings['formats'] if key in MESH_FORMAT_KEYS), MESH_FORMAT_KEYS[0])
     print_capabilities = _capabilities_for(selected_mesh_for_print, geometry)
@@ -3251,6 +3334,22 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 bool(settings.get('append_configuration_name', False))
             )
             append_config_input.tooltip = 'Append the active Fusion Configuration name to export file names.'
+            append_config_pref_input = inputs.addBoolValueInput(
+                'append_configuration_name_user_preference',
+                'Append Active Configuration Name Preference',
+                True,
+                '',
+                bool(settings.get('append_configuration_name_user_preference', settings.get('append_configuration_name', False)))
+            )
+            append_config_pref_input.isVisible = False
+            export_all_configs_input = inputs.addBoolValueInput(
+                'export_all_configurations',
+                'Export All Configurations',
+                True,
+                '',
+                bool(settings.get('export_all_configurations', False))
+            )
+            export_all_configs_input.tooltip = 'Export once per configuration row from the design configuration table.'
             open_folder_input = inputs.addBoolValueInput(
                 'open_folder_after_export',
                 'Open Destination After Export',
@@ -3483,6 +3582,12 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 _set_batch_folder_pending_state(inputs)
                 adsk.doEvents()
                 _refresh_batch_folder_cache(inputs)
+            elif changed_input.id == 'append_configuration_name':
+                export_all_input = adsk.core.BoolValueCommandInput.cast(inputs.itemById('export_all_configurations'))
+                append_pref_input = adsk.core.BoolValueCommandInput.cast(inputs.itemById('append_configuration_name_user_preference'))
+                append_input = adsk.core.BoolValueCommandInput.cast(changed_input)
+                if append_pref_input and append_input and not (export_all_input and export_all_input.value):
+                    append_pref_input.value = bool(append_input.value)
             elif changed_input.id.startswith('format_'):
                 format_key = changed_input.id.replace('format_', '', 1)
                 if _destination_mode_from_inputs(inputs) == 'print_utility' and format_key in MESH_FORMAT_KEYS:
