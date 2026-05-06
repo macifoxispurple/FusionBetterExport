@@ -148,6 +148,7 @@ GENERAL_DEFAULTS = {
     'run_on_startup': True,
     'allow_overwrite': True,
     'strip_version_numbers': True,
+    'append_configuration_name': False,
     'open_folder_after_export': True,
     'move_timeline_to_end': False,
     'mesh_group_expanded': True,
@@ -408,12 +409,84 @@ def _root_component():
     return design.rootComponent if design else None
 
 
-def _default_filename():
-    design = _active_design()
+def _default_filename(design=None):
+    design = design or _active_design()
     if design and design.parentDocument:
         name = design.parentDocument.name or 'mesh-export'
         return _sanitize_filename(name)
     return 'mesh-export'
+
+
+def _all_configuration_row_names(design):
+    names = []
+
+    def _add_name(value):
+        if isinstance(value, str):
+            text = value.strip()
+            if text and text not in names:
+                names.append(text)
+
+    def _collect(table):
+        if not table:
+            return
+        rows = _safe_call(lambda t=table: t.rows)
+        count = _safe_call(lambda r=rows: r.count) if rows else 0
+        for index in range(count or 0):
+            row = _safe_call(lambda collection=rows, i=index: collection.item(i))
+            if not row:
+                continue
+            _add_name(_safe_call(lambda r=row: r.name))
+            _add_name(_safe_call(lambda r=row: r.displayName))
+            _add_name(_safe_call(lambda r=row: r.rowName))
+
+    _collect(_safe_call(lambda d=design: d.configurationTopTable) if design else None)
+    document = _safe_call(lambda d=design: d.parentDocument) if design else None
+    data_file = _safe_call(lambda doc=document: doc.dataFile) if document else None
+    _collect(_safe_call(lambda df=data_file: df.configurationTable) if data_file else None)
+    return names
+
+
+def _strip_known_configuration_suffix(filename, config_names):
+    base = _sanitize_filename(filename)
+    base_lower = base.lower()
+    for config_name in config_names:
+        config_token = _sanitize_config_token(config_name)
+        if not config_token:
+            continue
+        suffix = '_{}'.format(config_token)
+        if base_lower.endswith(suffix.lower()):
+            return base[:-len(suffix)]
+    return base
+
+
+def _active_configuration_name(design=None):
+    design = design or _active_design()
+    if not design:
+        return ''
+    table = _safe_call(lambda d=design: d.configurationTopTable)
+    active_row = _safe_call(lambda t=table: t.activeRow) if table else None
+    name = _safe_call(lambda row=active_row: row.name) if active_row else ''
+    return name.strip() if isinstance(name, str) else ''
+
+
+def _filename_with_optional_configuration(settings, base_name, design=None):
+    design = design or _active_design()
+    filename = _sanitize_filename(base_name)
+    if not settings.get('append_configuration_name'):
+        return filename
+
+    known_config_names = _all_configuration_row_names(design)
+    filename = _strip_known_configuration_suffix(filename, known_config_names)
+    configuration_name = _sanitize_config_token(_active_configuration_name(design))
+    if not configuration_name:
+        return filename
+
+    filename_lower = filename.lower()
+    configuration_lower = configuration_name.lower()
+    if filename_lower == configuration_lower or filename_lower.endswith('_{}'.format(configuration_lower)):
+        return filename
+
+    return _sanitize_filename('{}_{}'.format(filename, configuration_name))
 
 
 def _current_project_key():
@@ -625,6 +698,13 @@ def _sanitize_filename(name):
     return sanitized or 'mesh-export'
 
 
+def _sanitize_config_token(name):
+    invalid = '<>:"/\\|?*'
+    sanitized = ''.join('_' if char in invalid else char for char in (name or '').strip())
+    sanitized = ''.join(sanitized.split())
+    return sanitized.rstrip('. ')
+
+
 def _format_extension(format_key):
     extension_map = {
         '3mf': '3mf',
@@ -676,7 +756,11 @@ def _sorted_project_folder_for_settings(settings):
         format_settings = _settings_for_format(settings, format_key)
         if format_settings.get('send_to_print_utility'):
             continue
-        filename = _sanitize_filename(format_settings.get('filename') or _default_filename())
+        filename = _filename_with_optional_configuration(
+            settings,
+            format_settings.get('filename') or _default_filename(_active_design()),
+            _active_design()
+        )
         full_name = '{}.{}'.format(filename, _format_extension(format_key))
         project_folder = project_name(normalize_final_name(full_name))
         return os.path.join(settings.get('sorted_output_folder', ''), project_folder)
@@ -815,8 +899,8 @@ def _execute_exports(settings, geometry, target_mode, show_progress=True, persis
 
         for index, format_key in enumerate(settings['formats'], start=1):
             format_settings = _settings_for_format(settings, format_key)
-            resolved_filename = _default_filename() if force_default_filenames else (format_settings['filename'] or _default_filename())
-            format_settings['filename'] = _sanitize_filename(resolved_filename)
+            resolved_filename = _default_filename(design) if force_default_filenames else (format_settings['filename'] or _default_filename(design))
+            format_settings['filename'] = _filename_with_optional_configuration(settings, resolved_filename, design)
             if settings['settings_mode'] == 'global':
                 settings['filename'] = format_settings['filename']
             else:
@@ -1467,6 +1551,7 @@ def _read_general_settings(inputs):
     run_on_startup = _read_bool_input(inputs, 'run_on_startup')
     allow_overwrite = _read_bool_input(inputs, 'allow_overwrite')
     strip_version_numbers = _read_bool_input(inputs, 'strip_version_numbers')
+    append_configuration_name = _read_bool_input(inputs, 'append_configuration_name')
     open_folder_after_export = _read_bool_input(inputs, 'open_folder_after_export')
     move_timeline_to_end = _read_bool_input(inputs, 'move_timeline_to_end')
     batch_include_subfolders = _read_bool_input(inputs, 'batch_include_subfolders')
@@ -1484,6 +1569,7 @@ def _read_general_settings(inputs):
         run_on_startup,
         allow_overwrite,
         strip_version_numbers,
+        append_configuration_name,
         open_folder_after_export,
         move_timeline_to_end,
         customize_per_format,
@@ -1502,6 +1588,7 @@ def _read_general_settings(inputs):
         'run_on_startup': run_on_startup,
         'allow_overwrite': allow_overwrite,
         'strip_version_numbers': strip_version_numbers,
+        'append_configuration_name': append_configuration_name,
         'open_folder_after_export': open_folder_after_export,
         'move_timeline_to_end': move_timeline_to_end,
         'batch_include_subfolders': batch_include_subfolders,
@@ -3156,6 +3243,14 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 bool(settings.get('strip_version_numbers', True))
             )
             strip_versions_input.tooltip = 'Keep project folders based on the clean project name, but remove Fusion version markers from sorted filenames.'
+            append_config_input = inputs.addBoolValueInput(
+                'append_configuration_name',
+                'Append Active Configuration Name',
+                True,
+                '',
+                bool(settings.get('append_configuration_name', False))
+            )
+            append_config_input.tooltip = 'Append the active Fusion Configuration name to export file names.'
             open_folder_input = inputs.addBoolValueInput(
                 'open_folder_after_export',
                 'Open Destination After Export',

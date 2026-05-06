@@ -147,6 +147,68 @@ class BetterExportUpdateRuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(self.manifest_path.read_text(encoding='utf-8'))['version'], '1.4.6')
         self.assertFalse(self.pending_dir.exists())
 
+    def test_filename_with_optional_configuration_replaces_prior_configuration_suffix(self):
+        class _Row:
+            def __init__(self, name):
+                self.name = name
+
+        class _Rows:
+            def __init__(self, names):
+                self._rows = [_Row(name) for name in names]
+                self.count = len(self._rows)
+
+            def item(self, index):
+                return self._rows[index]
+
+        class _Table:
+            def __init__(self, active_name, names):
+                self.activeRow = _Row(active_name)
+                self.rows = _Rows(names)
+
+        class _Design:
+            def __init__(self, active_name, names):
+                self.configurationTopTable = _Table(active_name, names)
+                self.parentDocument = types.SimpleNamespace(dataFile=None)
+
+        settings = {'append_configuration_name': True}
+        design = _Design('H2D Parts', ['H2D Parts', 'Large Parts'])
+
+        value = better_export._filename_with_optional_configuration(
+            settings,
+            'ConfigurablePictureClips_LargeParts',
+            design
+        )
+
+        self.assertEqual(value, 'ConfigurablePictureClips_H2DParts')
+
+    def test_filename_with_optional_configuration_skips_append_when_no_active_row_name(self):
+        class _Rows:
+            count = 0
+
+            @staticmethod
+            def item(_index):
+                return None
+
+        class _Row:
+            name = ''
+
+        class _Table:
+            activeRow = _Row()
+            rows = _Rows()
+
+        class _Design:
+            configurationTopTable = _Table()
+            parentDocument = types.SimpleNamespace(dataFile=None)
+
+        settings = {'append_configuration_name': True}
+        value = better_export._filename_with_optional_configuration(
+            settings,
+            'ConfigurablePictureClips',
+            _Design()
+        )
+
+        self.assertEqual(value, 'ConfigurablePictureClips')
+
 
 if __name__ == '__main__':
     unittest.main()
