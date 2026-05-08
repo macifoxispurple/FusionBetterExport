@@ -47,12 +47,25 @@ Manual spot-check (optional):
 - `python -m py_compile BetterExport/BetterExport.py BetterExport/export_sorter.py BetterExport/update_state.py`
 - `python -m unittest discover -s Tests -v`
 
+## Release Notes Responsibility (Required At Ship Start)
+
+- Agent drafts release notes first from the actual diff/context before final ship.
+- If commit history is low-signal or changes are substantial, use curated notes via `--notes-file`.
+- Release notes style is mandatory for every release:
+  - Dense, high-level, end-user readable summary of actual fixes/features.
+  - No internal implementation detail, test logs, or tool/process narration.
+  - Never include secrets or environment-specific operational details (API keys, SSH keys, tokens, auth identities, local usernames, machine names, local filesystem paths, or private infrastructure hostnames/IPs).
+  - Maximum 3 non-empty lines total (typically: 1 header + up to 2 bullets).
+  - Prefer plain-language outcomes (what changed for users and why it matters).
+- Recommended command when curated notes are prepared:
+  - `gh release create v<version> dist/BetterExport-<version>.zip --repo macifoxispurple/FusionBetterExport --title "Better Export v<version>" --notes-file dist/release-notes-v<version>.md`
+
 ## Release Flow
 
 1. Bump `BetterExport/BetterExport.manifest` version.
 2. Build zip with `scripts/package_release.py`.
-3. Run validation commands above.
-4. Commit source + tests + manifest + zip.
-5. Tag `v<version>`.
-6. Publish GitHub release with `dist/BetterExport-<version>.zip` attached.
-
+3. Draft release notes from actual diff/context and finalize curated notes file if needed.
+4. Run validation commands above.
+5. Commit source + tests + manifest + zip.
+6. Tag `v<version>`.
+7. Publish GitHub release with `dist/BetterExport-<version>.zip` attached.

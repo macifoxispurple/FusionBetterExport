@@ -52,6 +52,9 @@ from update_state import (
 COMMAND_ID = 'betterMeshExportCommand'
 COMMAND_NAME = 'Better Export'
 COMMAND_DESCRIPTION = 'Export mesh and CAD formats from Fusion with persistent settings.'
+QUICK_EXPORT_COMMAND_ID = 'betterMeshExportQuickCommand'
+QUICK_EXPORT_COMMAND_NAME = 'Quick Export (Last Settings)'
+QUICK_EXPORT_COMMAND_DESCRIPTION = 'Run Better Export immediately with your last saved settings.'
 BATCH_COMMAND_NAME = 'Batch Export Folder'
 BATCH_EXPORT_EVENT_ID = 'betterExportBatchFolderEvent'
 WORKSPACE_ID = 'FusionSolidEnvironment'
@@ -158,6 +161,7 @@ GENERAL_DEFAULTS = {
     'mesh_group_expanded': True,
     'cad_group_expanded': False,
     'batch_include_subfolders': False,
+    'quick_export_menu_enabled': True,
     'non_print_formats': ['stl'],
     'project_export_folders': {},
     'project_auto_sort_preferences': {},
@@ -1647,6 +1651,7 @@ def _read_general_settings(inputs):
     open_folder_after_export = _read_bool_input(inputs, 'open_folder_after_export')
     move_timeline_to_end = _read_bool_input(inputs, 'move_timeline_to_end')
     batch_include_subfolders = _read_bool_input(inputs, 'batch_include_subfolders')
+    quick_export_menu_enabled = _read_bool_input(inputs, 'quick_export_menu_enabled')
     customize_per_format = _read_bool_input(inputs, 'customize_per_format')
     f3d_enabled_preference = _read_bool_input(inputs, 'f3d_enabled_preference')
     mesh_group_input = adsk.core.GroupCommandInput.cast(inputs.itemById('mesh_format_group'))
@@ -1666,6 +1671,7 @@ def _read_general_settings(inputs):
         export_all_configurations,
         open_folder_after_export,
         move_timeline_to_end,
+        quick_export_menu_enabled,
         customize_per_format,
         f3d_enabled_preference
     ):
@@ -1698,10 +1704,16 @@ def _read_general_settings(inputs):
         'open_folder_after_export': open_folder_after_export,
         'move_timeline_to_end': move_timeline_to_end,
         'batch_include_subfolders': batch_include_subfolders,
+        'quick_export_menu_enabled': quick_export_menu_enabled,
         'mesh_group_expanded': mesh_group_expanded,
         'cad_group_expanded': cad_group_expanded,
         'settings_mode': 'per_format' if customize_per_format else 'global'
     }
+
+
+def _quick_export_menu_enabled():
+    settings = _load_settings()
+    return bool(settings.get('quick_export_menu_enabled', True))
 
 
 def _settings_for_format(settings, format_key):
@@ -1723,6 +1735,15 @@ def _selected_entity(inputs):
     if selection_input and selection_input.selectionCount > 0:
         return selection_input.selection(0).entity
     return None
+
+
+def _active_selected_entity():
+    selections = _safe_call(lambda: _ui.activeSelections) if _ui else None
+    count = _safe_call(lambda collection=selections: collection.count) if selections else 0
+    if not count:
+        return None
+    selection = _safe_call(lambda collection=selections: collection.item(0))
+    return _safe_call(lambda s=selection: s.entity) if selection else None
 
 
 def _selected_geometry(inputs):
@@ -3490,6 +3511,14 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 bool(settings.get('run_on_startup', True))
             )
             run_on_startup_input.tooltip = 'Launch Better Export automatically when Fusion starts.'
+            quick_export_menu_input = inputs.addBoolValueInput(
+                'quick_export_menu_enabled',
+                'Enable Quick Export Context Menu Item',
+                True,
+                '',
+                bool(settings.get('quick_export_menu_enabled', True))
+            )
+            quick_export_menu_input.tooltip = 'Show "Quick Export (Last Settings)" in the right-click menu.'
 
             _sync_ui(inputs)
             if settings.get('target_mode') == 'project_folder':
@@ -3750,6 +3779,50 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             _show_error(str(exc))
 
 
+class QuickExportExecuteHandler(adsk.core.CommandEventHandler):
+    def notify(self, args):
+        try:
+            settings = _load_settings()
+            settings = _merge_settings(settings)
+            target_mode = settings.get('target_mode', 'selection')
+
+            if target_mode == 'project_folder':
+                folder = _active_data_folder()
+                include_subfolders = bool(settings.get('batch_include_subfolders', False))
+                valid, message = _validate_batch_export_request(folder, settings, include_subfolders)
+                if not valid:
+                    raise ValueError(message)
+                _save_settings(settings)
+                global _batch_export_request
+                _batch_export_request = {
+                    'folder_label': _data_folder_display_name(folder),
+                    'files': _collect_batch_data_files(folder, include_subfolders),
+                    'settings': settings,
+                }
+                _app.fireCustomEvent(BATCH_EXPORT_EVENT_ID)
+                return
+
+            geometry = _active_selected_entity() if target_mode == 'selection' else _root_component()
+            if target_mode == 'selection' and not geometry:
+                raise ValueError('Select a body, component, or occurrence to export.')
+            if not _geometry_is_exportable(geometry, target_mode):
+                raise ValueError('Nothing exportable was found in the current target.')
+            _execute_exports(settings, geometry, target_mode, show_progress=True, persist_settings=True)
+        except Exception as exc:
+            _show_error(str(exc))
+
+
+class QuickExportCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
+    def notify(self, args):
+        try:
+            cmd = args.command
+            on_execute = QuickExportExecuteHandler()
+            cmd.execute.add(on_execute)
+            _handlers.append(on_execute)
+        except Exception:
+            _show_error(traceback.format_exc())
+
+
 def _validate_batch_export_request(folder, settings, include_subfolders):
     if not folder:
         return False, 'Open the Fusion Data Panel and select a project folder first.'
@@ -3902,6 +3975,12 @@ class MarkingMenuHandler(adsk.core.MarkingMenuEventHandler):
                 command_definition = _ui.commandDefinitions.itemById(COMMAND_ID)
                 if command_definition:
                     controls.addCommand(command_definition)
+            if _quick_export_menu_enabled():
+                quick_existing = controls.itemById(QUICK_EXPORT_COMMAND_ID)
+                if not quick_existing:
+                    quick_command_definition = _ui.commandDefinitions.itemById(QUICK_EXPORT_COMMAND_ID)
+                    if quick_command_definition:
+                        controls.addCommand(quick_command_definition)
         except Exception:
             pass
 
@@ -3936,6 +4015,18 @@ def run(context):
         on_command_created = CommandCreatedHandler()
         command_definition.commandCreated.add(on_command_created)
         _handlers.append(on_command_created)
+
+        quick_command_definition = _ui.commandDefinitions.itemById(QUICK_EXPORT_COMMAND_ID)
+        if not quick_command_definition:
+            quick_command_definition = _ui.commandDefinitions.addButtonDefinition(
+                QUICK_EXPORT_COMMAND_ID,
+                QUICK_EXPORT_COMMAND_NAME,
+                QUICK_EXPORT_COMMAND_DESCRIPTION,
+                os.path.join(os.path.dirname(__file__), 'resources')
+            )
+        on_quick_command_created = QuickExportCommandCreatedHandler()
+        quick_command_definition.commandCreated.add(on_quick_command_created)
+        _handlers.append(on_quick_command_created)
 
         batch_custom_event = _app.registerCustomEvent(BATCH_EXPORT_EVENT_ID)
         on_batch_event = BatchExportCustomEventHandler()
@@ -4001,6 +4092,9 @@ def stop(context):
             definition = _ui.commandDefinitions.itemById(COMMAND_ID)
             if definition:
                 definition.deleteMe()
+            quick_definition = _ui.commandDefinitions.itemById(QUICK_EXPORT_COMMAND_ID)
+            if quick_definition:
+                quick_definition.deleteMe()
         if _app:
             try:
                 _app.unregisterCustomEvent(BATCH_EXPORT_EVENT_ID)
