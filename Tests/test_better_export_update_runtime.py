@@ -112,6 +112,18 @@ class BetterExportUpdateRuntimeTests(unittest.TestCase):
         self.startup_calls.append(bool(enabled))
         self.startup_state['value'] = bool(enabled)
 
+    def test_validate_handler_does_not_mutate_dialog_inputs(self):
+        class _Inputs:
+            def itemById(self, _input_id):
+                raise AssertionError('Validation must not mutate dialog inputs.')
+
+        args = types.SimpleNamespace(inputs=_Inputs(), areInputsValid=None)
+
+        with mock.patch.object(better_export, '_validate_inputs', return_value=(True, '')):
+            better_export.ValidateHandler().notify(args)
+
+        self.assertTrue(args.areInputsValid)
+
     def test_missing_pending_files_transition_staged_update_to_failed(self):
         staged_state = stage_update_state('1.5.0', '1.4.6', str(self.pending_dir / 'staged'), True)
         better_export._write_current_update_state(staged_state)

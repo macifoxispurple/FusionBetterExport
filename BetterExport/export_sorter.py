@@ -185,7 +185,8 @@ def _rewrite_obj_mtllib_reference(path, simulate_only):
     if path.suffix.lower() != ".obj" or not path.exists() or simulate_only:
         return False
 
-    original_text = path.read_text(encoding="utf-8", errors="surrogateescape", newline="")
+    with path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+        original_text = handle.read()
     changed = False
     rewritten_lines = []
 
@@ -206,7 +207,8 @@ def _rewrite_obj_mtllib_reference(path, simulate_only):
     if not changed:
         return False
 
-    path.write_text("".join(rewritten_lines), encoding="utf-8", errors="surrogateescape", newline="")
+    with path.open("w", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+        handle.write("".join(rewritten_lines))
     return True
 
 

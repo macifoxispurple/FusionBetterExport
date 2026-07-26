@@ -187,7 +187,6 @@ _ui_sync_in_progress = False
 _format_sync_in_progress = False
 _ignored_format_uncheck_events = set()
 _batch_export_request = None
-_focused_filename_input_id = ''
 
 
 def _open_folder_in_system(path_value):
@@ -3550,7 +3549,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
     def notify(self, args):
-        global _ui_sync_in_progress, _format_sync_in_progress, _ignored_format_uncheck_events, _focused_filename_input_id
+        global _ui_sync_in_progress, _format_sync_in_progress, _ignored_format_uncheck_events
         try:
             if _ui_sync_in_progress:
                 return
@@ -3708,19 +3707,10 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                         cad_preferences_input.value = ','.join(selected_cad)
 
             if changed_input.id.endswith('filename'):
-                # Don't rewrite while typing; assigning .value can reset caret position.
-                # Filenames are sanitized later at export-time.
+                # Fusion provides no reliable blur event for text inputs. Never sync,
+                # persist, or rewrite a filename after creation; sanitize at export.
                 skip_full_ui_sync = True
-                # Persisting on every keystroke can also trigger Fusion-side input refresh
-                # and disturb caret position.
                 skip_preference_persist = True
-                _focused_filename_input_id = changed_input.id
-            elif _focused_filename_input_id:
-                # Blur detected: sanitize once focus leaves filename field.
-                previous_filename_input = adsk.core.StringValueCommandInput.cast(inputs.itemById(_focused_filename_input_id))
-                if previous_filename_input:
-                    previous_filename_input.value = _sanitize_filename(previous_filename_input.value)
-                _focused_filename_input_id = ''
 
             if not skip_full_ui_sync:
                 _sync_ui(inputs)
@@ -3733,22 +3723,8 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
 class ValidateHandler(adsk.core.ValidateInputsEventHandler):
     def notify(self, args):
         try:
-            if _focused_filename_input_id:
-                args.areInputsValid = True
-                return
-            valid, message = _validate_inputs(args.inputs)
+            valid, _ = _validate_inputs(args.inputs)
             args.areInputsValid = valid
-            target_hint = args.inputs.itemById('target_hint')
-            if not valid and message:
-                target_hint.formattedText = message
-            elif _target_mode_from_inputs(args.inputs) == 'full_design':
-                target_hint.formattedText = 'Exports the full design from the root component after temporarily showing everything.'
-            elif _target_mode_from_inputs(args.inputs) == 'project_folder':
-                target_hint.formattedText = 'Exports every Fusion design in the active Data Panel folder using your current Better Export settings. This mode always exports the full design.'
-            elif _target_mode_from_inputs(args.inputs) == 'visible_bodies':
-                target_hint.formattedText = 'Exports only bodies that are currently visible in the design.'
-            else:
-                target_hint.formattedText = 'Select a body, component, or occurrence to export.'
         except Exception:
             args.areInputsValid = False
 
