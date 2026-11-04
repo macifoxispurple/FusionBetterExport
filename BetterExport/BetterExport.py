@@ -408,8 +408,23 @@ def _normalized_update_check(value):
 
 
 def _active_design():
-    product = _app.activeProduct
+    # A document can contain a Design even while Animation or CAM is active.
+    product = _safe_call(lambda: _app.activeDocument.products.itemByProductType('DesignProductType'))
+    if product is None:
+        product = _safe_call(lambda: _app.activeProduct)
     return adsk.fusion.Design.cast(product)
+
+
+def _prepare_design_workspace_for_export():
+    if not _active_design():
+        raise ValueError('Open a Fusion design before exporting.')
+    workspace = _ui.workspaces.itemById(WORKSPACE_ID) if _ui else None
+    if not workspace:
+        raise ValueError('The Design workspace is unavailable. Switch to Design and retry the export.')
+    if not workspace.isActive:
+        if not workspace.activate():
+            raise ValueError('Could not activate the Design workspace. Switch to Design and retry the export.')
+    return _active_design()
 
 
 def _root_component():
@@ -519,6 +534,9 @@ def _current_project_key():
     document_name = design.parentDocument.name or ''
     stem = os.path.splitext(document_name)[0]
     key = VERSION_TOKEN_RE.sub(lambda match: match.group(1), stem).strip()
+    if re.fullmatch(r'Untitled(?:\s+\d+)?', key, re.IGNORECASE) and not _safe_call(lambda: design.parentDocument.dataFile):
+        # New documents share recent preferences, not the legacy Untitled entry.
+        return ''
     return key or _sanitize_filename(stem)
 
 
@@ -889,7 +907,7 @@ def _execute_exports(settings, geometry, target_mode, show_progress=True, persis
         if any(_settings_for_format(settings, format_key).get('send_to_print_utility') for format_key in settings['formats']):
             open_after_export = False
 
-        design = _active_design()
+        design = _prepare_design_workspace_for_export()
         if not design:
             raise ValueError('Open a Fusion design before exporting.')
 
@@ -2262,6 +2280,13 @@ def _sync_destination_mode_dropdown(dropdown, selected_mode, project_folder_mode
 
     try:
         list_items = dropdown.listItems
+        expected_labels = [DESTINATION_MODE_LABELS[mode] for mode in allowed_modes]
+        current_labels = [list_items.item(index).name for index in range(list_items.count)]
+        if current_labels == expected_labels:
+            selected_item = dropdown.selectedItem
+            if not selected_item or selected_item.name != DESTINATION_MODE_LABELS[selected_mode]:
+                _select_dropdown_label(dropdown, DESTINATION_MODE_LABELS[selected_mode])
+            return selected_mode
         list_items.clear()
         for mode in allowed_modes:
             list_items.add(DESTINATION_MODE_LABELS[mode], mode == selected_mode, '')
@@ -3734,6 +3759,8 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
         global _batch_export_request
         try:
             inputs = args.command.commandInputs
+            if _target_mode_from_inputs(inputs) != 'project_folder':
+                _prepare_design_workspace_for_export()
             valid, message = _validate_inputs(inputs)
             if not valid:
                 raise ValueError(message)
@@ -3778,6 +3805,7 @@ class QuickExportExecuteHandler(adsk.core.CommandEventHandler):
                 _app.fireCustomEvent(BATCH_EXPORT_EVENT_ID)
                 return
 
+            _prepare_design_workspace_for_export()
             geometry = _active_selected_entity() if target_mode == 'selection' else _root_component()
             if target_mode == 'selection' and not geometry:
                 raise ValueError('Select a body, component, or occurrence to export.')
@@ -3857,6 +3885,7 @@ class BatchExportCustomEventHandler(adsk.core.CustomEventHandler):
 
                     opened_document = _app.documents.open(data_file)
                     adsk.doEvents()
+                    _prepare_design_workspace_for_export()
                     export_settings = _merge_settings(settings)
                     export_settings['open_folder_after_export'] = False
                     result = _execute_exports(

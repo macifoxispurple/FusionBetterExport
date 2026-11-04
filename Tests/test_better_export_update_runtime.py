@@ -124,6 +124,109 @@ class BetterExportUpdateRuntimeTests(unittest.TestCase):
 
         self.assertTrue(args.areInputsValid)
 
+    def test_untitled_uses_recent_preferences_and_preserves_document_preferences(self):
+        settings_path = self.temp_dir / 'settings.json'
+        settings_path.write_text(json.dumps({
+            'folder': 'chosen-output', 'auto_sort_after_export': True,
+            'project_export_folders': {'saved-document': 'document-output', 'Untitled': 'old-output', 'recent': 'chosen-output'},
+            'project_auto_sort_preferences': {'saved-document': False, 'Untitled': False, 'recent': True},
+        }), encoding='utf-8')
+        document = types.SimpleNamespace(name='Untitled', dataFile=None)
+        design = types.SimpleNamespace(parentDocument=document)
+        with mock.patch.object(better_export, 'SETTINGS_PATH', str(settings_path)), \
+             mock.patch.object(better_export, '_active_design', return_value=design), \
+             mock.patch.object(better_export, '_current_run_on_startup_enabled', return_value=True):
+            loaded = better_export._upgrade_settings_file()
+            self.assertTrue(loaded['auto_sort_after_export'])
+            self.assertEqual(loaded['folder'], 'chosen-output')
+            loaded['folder'] = 'new-output'
+            better_export._save_settings(loaded)
+            reloaded = better_export._load_settings()
+            self.assertTrue(reloaded['auto_sort_after_export'])
+            self.assertEqual(reloaded['folder'], 'new-output')
+            self.assertFalse(reloaded['project_auto_sort_preferences']['Untitled'])
+            document.name = 'saved-document'
+            document.dataFile = object()
+            reloaded = better_export._load_settings()
+            self.assertFalse(reloaded['auto_sort_after_export'])
+            self.assertEqual(reloaded['folder'], 'document-output')
+
+    def test_saved_untitled_retains_its_document_key(self):
+        document = types.SimpleNamespace(name='Untitled', dataFile=object())
+        with mock.patch.object(better_export, '_active_design', return_value=types.SimpleNamespace(parentDocument=document)):
+            self.assertEqual(better_export._current_project_key(), 'Untitled')
+
+    def test_destination_dropdown_sync_keeps_existing_sorted_selection(self):
+        items = [types.SimpleNamespace(name=label) for label in better_export.DESTINATION_MODE_LABELS.values()]
+        list_items = types.SimpleNamespace(count=len(items), item=lambda index: items[index], clear=mock.Mock())
+        dropdown = types.SimpleNamespace(
+            listItems=list_items,
+            selectedItem=next(item for item in items if item.name == better_export.DESTINATION_MODE_LABELS['sorted'])
+        )
+        self.assertEqual(better_export._sync_destination_mode_dropdown(dropdown, 'sorted', False), 'sorted')
+        list_items.clear.assert_not_called()
+        self.assertEqual(dropdown.selectedItem.name, better_export.DESTINATION_MODE_LABELS['sorted'])
+
+    def test_active_design_uses_document_product_in_animation(self):
+        design = object()
+        products = types.SimpleNamespace(itemByProductType=mock.Mock(return_value=design))
+        app = types.SimpleNamespace(
+            activeDocument=types.SimpleNamespace(products=products), activeProduct=None
+        )
+        with mock.patch.object(better_export, '_app', app):
+            self.assertIs(better_export._active_design(), design)
+        products.itemByProductType.assert_called_once_with('DesignProductType')
+
+    def test_export_activates_design_workspace_only_when_needed(self):
+        workspace = types.SimpleNamespace(isActive=False, activate=mock.Mock(return_value=True))
+        ui = types.SimpleNamespace(workspaces=types.SimpleNamespace(itemById=lambda _: workspace))
+        with mock.patch.object(better_export, '_active_design', return_value=object()), \
+             mock.patch.object(better_export, '_ui', ui):
+            better_export._prepare_design_workspace_for_export()
+            workspace.activate.assert_called_once_with()
+            workspace.isActive = True
+            better_export._prepare_design_workspace_for_export()
+            workspace.activate.assert_called_once_with()
+
+    def test_export_reports_failed_workspace_activation(self):
+        workspace = types.SimpleNamespace(isActive=False, activate=lambda: False)
+        ui = types.SimpleNamespace(workspaces=types.SimpleNamespace(itemById=lambda _: workspace))
+        with mock.patch.object(better_export, '_active_design', return_value=object()), \
+             mock.patch.object(better_export, '_ui', ui):
+            with self.assertRaisesRegex(ValueError, 'Could not activate the Design workspace'):
+                better_export._prepare_design_workspace_for_export()
+
+    def test_batch_prepares_each_document_before_resolving_export_geometry(self):
+        files = [types.SimpleNamespace(name='Animation design'), types.SimpleNamespace(name='Design file')]
+        workspace = types.SimpleNamespace(isActive=False)
+        workspace.activate = mock.Mock(side_effect=lambda: setattr(workspace, 'isActive', True) or True)
+        ui = types.SimpleNamespace(
+            workspaces=types.SimpleNamespace(itemById=lambda _: workspace),
+            createProgressDialog=lambda: None, messageBox=mock.Mock()
+        )
+
+        def open_document(_):
+            workspace.isActive = False
+            return types.SimpleNamespace(close=mock.Mock())
+
+        def root_component():
+            self.assertTrue(workspace.isActive)
+            return 'root'
+
+        app = types.SimpleNamespace(activeDocument=None, documents=types.SimpleNamespace(open=open_document))
+        request = {'files': files, 'settings': {'open_folder_after_export': False}}
+        with mock.patch.object(better_export, '_app', app), \
+             mock.patch.object(better_export, '_ui', ui), \
+             mock.patch.object(better_export, '_active_design', return_value=object()), \
+             mock.patch.object(better_export, '_root_component', side_effect=root_component), \
+             mock.patch.object(better_export, '_snapshot_open_documents', return_value=[]), \
+             mock.patch.object(better_export, '_is_preexisting_document', return_value=False), \
+             mock.patch.object(better_export, '_batch_export_request', request), \
+             mock.patch.object(better_export, '_execute_exports', return_value={'succeeded': True}) as export:
+            better_export.BatchExportCustomEventHandler().notify(None)
+        self.assertEqual(workspace.activate.call_count, 2)
+        self.assertEqual(export.call_count, 2)
+
     def test_missing_pending_files_transition_staged_update_to_failed(self):
         staged_state = stage_update_state('1.5.0', '1.4.6', str(self.pending_dir / 'staged'), True)
         better_export._write_current_update_state(staged_state)
